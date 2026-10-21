@@ -1,0 +1,4 @@
+target/
+packaging/out/
+packaging/stage/
+*.deb

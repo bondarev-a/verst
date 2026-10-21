@@ -1,0 +1,22 @@
+[package]
+name = "text_workspace"
+version = "0.3.0"
+edition = "2021"
+description = "Локальный редактор текстовых файлов с навигацией как в IDE"
+publish = false
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gtk4", "dep:sourceview5", "dep:webkit6"]
+
+[dependencies]
+gtk4 = { version = "0.10.3", features = ["gnome_46"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pulldown-cmark = "0.12.2"
+sourceview5 = { version = "0.10.0", features = ["gtk_v4_14"], optional = true }
+webkit6 = { version = "0.5.0", optional = true }
+
+[lib]
+name = "text_workspace"
+path = "src/lib.rs"

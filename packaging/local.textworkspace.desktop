@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Verst
+GenericName=Text Workspace
+Comment=Исходник и страница одного файла
+Exec=verst %U
+Icon=verst
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;text/x-markdown;
+StartupWMClass=local.textworkspace
+Keywords=markdown;notes;editor;
