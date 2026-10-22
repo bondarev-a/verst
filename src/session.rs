@@ -10,6 +10,14 @@ use crate::zoom::{self, BASE_PT};
 pub const OPEN_LIMIT_DEFAULT: u32 = 5;
 pub const OPEN_LIMIT_MIN: u32 = 1;
 pub const OPEN_LIMIT_MAX: u32 = 50;
+pub const MIN_WINDOW_WIDTH: i32 = 960;
+pub const MIN_WINDOW_HEIGHT: i32 = 600;
+pub const NAV_MIN_WIDTH: i32 = 220;
+pub const NAV_MAX_WIDTH: i32 = 480;
+pub const INFO_MIN_WIDTH: i32 = 220;
+pub const INFO_MAX_WIDTH: i32 = 720;
+pub const DOCK_RAIL_WIDTH: i32 = 44;
+pub const ACTIVITY_WIDTH: i32 = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -103,6 +111,32 @@ pub struct Session {
     /// В каком виде оставался каждый файл: редактирование или просмотр.
     #[serde(default)]
     pub file_modes: Vec<FileMode>,
+    /// Тег, по которому отфильтрованы быстрые заметки. Пусто — показать все.
+    #[serde(default)]
+    pub note_tag: Option<String>,
+    /// Порядок вкладок слева. Пустой список дополняется обычным порядком.
+    #[serde(default)]
+    pub left_order: Vec<String>,
+    #[serde(default)]
+    pub right_order: Vec<String>,
+    /// flat, created, modified или tags.
+    #[serde(default = "default_note_group")]
+    pub note_group: String,
+    /// Раскрыт ли список тегов в заметках. По умолчанию свёрнут.
+    #[serde(default)]
+    pub note_tags_open: bool,
+    #[serde(default = "default_true")]
+    pub nav_open: bool,
+    #[serde(default = "default_true")]
+    pub nav_pinned: bool,
+    #[serde(default = "default_true")]
+    pub info_open: bool,
+    #[serde(default = "default_true")]
+    pub info_pinned: bool,
+    #[serde(default = "default_nav_width")]
+    pub nav_width: i32,
+    #[serde(default = "default_info_width")]
+    pub info_width: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +176,22 @@ fn default_open_limit() -> u32 {
     OPEN_LIMIT_DEFAULT
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_note_group() -> String {
+    "flat".to_string()
+}
+
+fn default_nav_width() -> i32 {
+    280
+}
+
+fn default_info_width() -> i32 {
+    320
+}
+
 impl Default for Session {
     fn default() -> Self {
         Self {
@@ -167,6 +217,17 @@ impl Default for Session {
             open_limit: OPEN_LIMIT_DEFAULT,
             word_wrap: false,
             file_modes: Vec::new(),
+            note_tag: None,
+            left_order: Vec::new(),
+            right_order: Vec::new(),
+            note_group: default_note_group(),
+            note_tags_open: false,
+            nav_open: true,
+            nav_pinned: true,
+            info_open: true,
+            info_pinned: true,
+            nav_width: default_nav_width(),
+            info_width: default_info_width(),
         }
     }
 }
@@ -239,8 +300,17 @@ impl Session {
             seams::canonical_panel(PanelSide::Right, &self.right_panel, self.right_page);
         self.left_page = seams::panel_index(&self.left_panel).unwrap_or(0);
         self.right_page = seams::panel_index(&self.right_panel).unwrap_or(0);
-        self.window_width = self.window_width.clamp(800, 8000);
-        self.window_height = self.window_height.clamp(500, 8000);
+        self.left_order = seams::ordered_ids(PanelSide::Left, &[]);
+        self.right_order = seams::ordered_ids(PanelSide::Right, &self.right_order);
+        self.note_group = crate::notes::note_group(&self.note_group).as_str().to_string();
+        if !(NAV_MIN_WIDTH..=NAV_MAX_WIDTH).contains(&self.nav_width) {
+            self.nav_width = default_nav_width();
+        }
+        if !(INFO_MIN_WIDTH..=INFO_MAX_WIDTH).contains(&self.info_width) {
+            self.info_width = default_info_width();
+        }
+        self.window_width = self.window_width.clamp(MIN_WINDOW_WIDTH, 8000);
+        self.window_height = self.window_height.clamp(MIN_WINDOW_HEIGHT, 8000);
         dedupe_carets(&mut self.carets);
         for pane in self.pane_paths.clone() {
             if let Some(path) = pane {
@@ -361,20 +431,30 @@ mod tests {
         assert_eq!(session.open_limit, OPEN_LIMIT_DEFAULT);
         assert!(!session.word_wrap);
         assert!(session.file_modes.is_empty());
+        assert!(session.note_tag.is_none());
+        assert_eq!(session.note_group, "flat");
+        assert!(!session.note_tags_open);
+        assert!(session.nav_open && session.nav_pinned);
+        assert!(session.info_open && session.info_pinned);
+        assert_eq!(
+            session.left_order,
+            ["disk", "workspace", "notes", "open", "history"]
+        );
+        assert_eq!(session.nav_width, 280);
         let session = Session::from_json(r#"{"word_wrap":true}"#).unwrap();
         assert!(session.word_wrap);
     }
 
     #[test]
     fn history_page_is_kept() {
-        let session = Session::from_json(r#"{"left_page":3}"#).unwrap();
+        let session = Session::from_json(r#"{"left_page":4}"#).unwrap();
         assert_eq!(session.left_panel, "history");
-        assert_eq!(session.left_page, 3);
+        assert_eq!(session.left_page, 4);
         let session = Session::from_json(r#"{"left_page":9}"#).unwrap();
         assert_eq!(session.left_panel, "disk");
         let session = Session::from_json(r#"{"left_panel":"open","left_page":0}"#).unwrap();
         assert_eq!(session.left_panel, "open");
-        assert_eq!(session.left_page, 2);
+        assert_eq!(session.left_page, 3);
     }
 
     #[test]
@@ -391,6 +471,18 @@ mod tests {
     fn zoom_is_clamped_on_load() {
         let session = Session::from_json(r#"{"zoom_pt": 400}"#).unwrap();
         assert_eq!(session.zoom_pt, zoom::MAX_PT);
+    }
+
+    #[test]
+    fn window_size_stays_above_the_minimum() {
+        let session = Session::from_json(
+            r#"{"window_width":100,"window_height":100,"nav_width":20,"info_width":4000}"#,
+        )
+        .unwrap();
+        assert_eq!(session.window_width, MIN_WINDOW_WIDTH);
+        assert_eq!(session.window_height, MIN_WINDOW_HEIGHT);
+        assert_eq!(session.nav_width, 280);
+        assert_eq!(session.info_width, 320);
     }
 
     #[test]

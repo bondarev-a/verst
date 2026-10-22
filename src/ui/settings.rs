@@ -30,6 +30,7 @@ impl Ctx {
             .title("Настройки")
             .default_width(760)
             .build();
+        window.add_css_class("verst");
         let box_ = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
         box_.set_hexpand(true);
         let columns = gtk4::Box::new(gtk4::Orientation::Horizontal, 16);

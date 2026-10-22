@@ -132,7 +132,16 @@ impl LinkIndex {
         map: &'a HashMap<PathBuf, Vec<PathBuf>>,
         path: &Path,
     ) -> &'a [PathBuf] {
-        map.get(path).map(Vec::as_slice).unwrap_or(&[])
+        if let Some(found) = map.get(path) {
+            return found;
+        }
+        let normalized = markdown::normalize(path.to_path_buf());
+        if normalized.as_path() != path {
+            if let Some(found) = map.get(normalized.as_path()) {
+                return found;
+            }
+        }
+        &[]
     }
 }
 
@@ -651,5 +660,16 @@ mod tests {
         let wiki_targets = outgoing_targets(&wiki, &models.join("wiki.md"), &models, &wiki_files);
         assert!(wiki_targets.iter().any(|path| path.ends_with("todo.txt")));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn outgoing_lookup_accepts_a_dot_segment() {
+        let mut index = LinkIndex::default();
+        let key = PathBuf::from("/tmp/notes/a.md");
+        index
+            .outgoing
+            .insert(key, vec![PathBuf::from("/tmp/notes/b.md")]);
+        let aliased = PathBuf::from("/tmp/notes/./a.md");
+        assert_eq!(index.outgoing_of(&aliased).len(), 1);
     }
 }

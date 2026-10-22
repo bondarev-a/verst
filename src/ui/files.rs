@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
-use text_workspace::{kind, places};
+use text_workspace::session::ViewMode;
+use text_workspace::{kind, notes, places};
 
 use super::support::{buffer_text_of, read_text, watch_file, write_atomic};
 use super::{BufferEntry, Ctx, AUTOSAVE_MS};
@@ -28,8 +29,10 @@ impl Ctx {
         {
             let mut state = self.state.borrow_mut();
             state.browsing = false;
-            if !state.loading {
-                let mode = if keep_mode {
+            if notes::is_inbox(&path) || !state.loading {
+                let mode = if notes::is_inbox(&path) {
+                    ViewMode::Edit
+                } else if keep_mode {
                     state.session.mode_of(&path).unwrap_or(state.view_mode)
                 } else {
                     state
@@ -38,6 +41,7 @@ impl Ctx {
                         .unwrap_or(state.session.open_mode)
                 };
                 state.view_mode = mode;
+                state.session.view_mode = mode;
                 state.session.remember_mode(path.clone(), mode);
             }
             state.session.open_files.retain(|open| open != &path);
@@ -228,6 +232,9 @@ impl Ctx {
                 }
                 self.refresh_open_list();
                 self.refresh_file_facts();
+                if path.starts_with(text_workspace::notes::notes_dir()) {
+                    self.refresh_notes();
+                }
                 if from_autosave {
                     self.set_status("Автосохранение");
                 } else {

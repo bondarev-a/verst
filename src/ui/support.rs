@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -16,108 +15,24 @@ use text_workspace::{graph, kind, markdown, seams};
 use super::{Ctx, MAX_OPEN_BYTES, TREE_ATTRS};
 
 pub(super) const CHROME_CSS: &str = "
-.pathbar {
-    margin: 6px 12px 0 12px;
-    padding: 4px 6px;
-    border-radius: 12px;
-    background-color: alpha(@theme_fg_color, 0.055);
+/* Один стиль: радиус 10 у кнопок, 12 у панелей, акцент темы у выбора. */
+window.verst {
+    background-color: @theme_bg_color;
 }
-.pathbar .path-label {
-    font-family: monospace;
-}
-.pinbar {
-    margin: 8px 12px 0 12px;
-}
-.findbar {
-    margin: 8px 12px 0 12px;
-}
-.side-caption {
-    margin: 10px 12px 2px 12px;
-}
-.links-page expander {
-    margin: 4px 8px 0 8px;
-}
-.links-page list {
-    background: transparent;
-}
-.links-page button.link-row {
-    padding: 2px 8px;
-    border-radius: 8px;
-}
-.doc-side {
-    margin-right: 8px;
-}
-.file-facts {
-    margin: 2px 10px 8px 10px;
-}
-.workspace-main {
-    margin: 8px 10px 0 10px;
-}
-.statusbar {
-    margin: 4px 14px 8px 14px;
-}
-notebook.sidebar-notebook > header {
-    background: transparent;
-}
-notebook.sidebar-notebook > header > tabs > tab {
-    border-radius: 8px;
-    margin: 4px 2px;
-    padding: 2px 10px;
-    border-width: 0;
-    background-image: none;
-    box-shadow: none;
-}
-notebook.sidebar-notebook > header > tabs > tab:checked,
-notebook.sidebar-notebook > header.top > tabs > tab:checked {
-    box-shadow: none;
-    background-color: alpha(@theme_fg_color, 0.14);
-}
-button.tag-chip {
-    border-radius: 999px;
-    padding: 1px 8px;
-    min-height: 0;
-}
-button.tag-chip-on {
-    background-color: alpha(@theme_selected_bg_color, 0.35);
-}
-listview > row {
-    border-radius: 8px;
-    margin: 1px 6px;
-}
-.explorer listview > row {
-    margin: 0;
-    border-radius: 0;
-}
-.explorer-bar {
-    margin: 8px 12px 0 12px;
-}
-button.crumb {
-    padding: 2px 8px;
-    min-height: 0;
-}
-button.mode-toggle {
-    border-radius: 999px;
-    padding: 8px;
-    background-color: alpha(@theme_bg_color, 0.9);
-    box-shadow: 0 1px 3px alpha(black, 0.28), 0 8px 18px alpha(black, 0.14);
-    opacity: 0.92;
-}
-button.mode-toggle:hover {
-    opacity: 1;
-}
-headerbar {
-    background: transparent;
+window.verst headerbar {
+    background: @theme_bg_color;
     box-shadow: none;
     border-bottom: none;
+    padding: 2px 8px 0 8px;
 }
-menubar {
-    background: transparent;
+window.verst menubar {
+    background: @theme_bg_color;
     box-shadow: none;
-    padding: 2px 8px 4px 8px;
+    padding: 0 10px 6px 10px;
     border-bottom: 1px solid alpha(@theme_fg_color, 0.08);
 }
-menubar > item,
-menubar item button {
+window.verst menubar > item,
+window.verst menubar item button {
     border-radius: 999px;
     padding: 4px 14px;
     margin: 0 2px;
@@ -125,23 +40,310 @@ menubar item button {
     box-shadow: none;
     border: none;
 }
-menubar > item:hover,
-menubar > item:selected,
-menubar item button:hover,
-menubar item button:checked {
+window.verst menubar > item:hover,
+window.verst menubar > item:selected,
+window.verst menubar item button:hover,
+window.verst menubar item button:checked {
     background-color: alpha(@theme_fg_color, 0.10);
 }
-popover.menu,
-popover.context-menu {
+window.verst .pinbar,
+window.verst .pathbar,
+window.verst .findbar,
+window.verst .explorer-bar {
+    margin: 8px 12px 0 12px;
+    padding: 4px;
+    border-radius: 12px;
+    background-color: alpha(@theme_fg_color, 0.05);
+    border: 1px solid alpha(@theme_fg_color, 0.06);
+}
+window.verst .pathbar .path-label {
+    font-family: monospace;
+}
+window.verst .statusbar {
+    margin: 6px 16px 8px 16px;
+}
+window.verst .workspace-main {
+    margin: 8px 12px 0 12px;
+}
+window.verst .sidebar-notebook,
+window.verst .doc-side,
+window.verst .side-rail {
+    border-radius: 12px;
+    background-color: alpha(@theme_fg_color, 0.04);
+}
+window.verst .doc-side {
+    margin: 0;
+    padding: 4px 0 8px 0;
+}
+window.verst .doc-side .sidebar-notebook {
+    background: transparent;
+}
+window.verst .side-rail {
+    padding: 6px 2px;
+}
+window.verst .side-rail button {
+    margin: 2px 0;
+}
+window.verst .sidebar-notebook scrolledwindow,
+window.verst .sidebar-notebook viewport,
+window.verst .doc-side scrolledwindow,
+window.verst .doc-side viewport,
+window.verst list.navigation-sidebar {
     background-color: transparent;
-    border-radius: 16px;
+}
+window.verst notebook.sidebar-notebook > header {
+    background: transparent;
+}
+window.verst notebook.sidebar-notebook > header > tabs > tab {
+    border-radius: 999px;
+    margin: 6px 2px;
+    padding: 4px 12px;
+    border-width: 0;
+    background-image: none;
+    box-shadow: none;
+}
+window.verst notebook.sidebar-notebook > header > tabs > tab:checked,
+window.verst notebook.sidebar-notebook > header.top > tabs > tab:checked {
+    box-shadow: none;
+    background-image: none;
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+window.verst button,
+window.verst menubutton > button {
+    border-radius: 999px;
+    min-height: 28px;
+    padding: 4px 12px;
+}
+window.verst menubutton {
+    padding: 0;
+    background: none;
+    box-shadow: none;
+    border: none;
+}
+window.verst button.flat,
+window.verst menubutton > button,
+window.verst button.tag-chip,
+window.verst button.crumb,
+window.verst .note-move {
+    background-image: none;
+    background-color: alpha(@theme_fg_color, 0.08);
+    color: @theme_fg_color;
+    box-shadow: none;
+    border: 1px solid alpha(@theme_fg_color, 0.16);
+}
+window.verst button.flat:hover,
+window.verst menubutton > button:hover,
+window.verst .note-move:hover,
+window.verst button.tag-chip:hover {
+    background-color: alpha(@theme_fg_color, 0.14);
+}
+window.verst button.row-title,
+window.verst button.link-row,
+window.verst button.row-action {
+    background-image: none;
+    background-color: transparent;
+    color: @theme_fg_color;
+    border: none;
+    box-shadow: none;
+    min-height: 0;
+    padding: 4px 8px;
+    border-radius: 8px;
+}
+window.verst button.row-title,
+window.verst button.link-row {
+    min-height: 32px;
+}
+window.verst button.row-title:hover,
+window.verst button.link-row:hover,
+window.verst button.row-action:hover {
+    background-color: alpha(@theme_fg_color, 0.08);
+}
+window.verst button.suggested-action,
+window.verst button.flat.suggested-action,
+window.verst button.tag-chip.tag-chip-on,
+window.verst .pinbar .linked > button.suggested-action,
+window.verst button.row-action.suggested-action,
+window.verst togglebutton.flat:checked {
+    background-image: none;
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+    border-color: transparent;
+    box-shadow: none;
+}
+window.verst button.suggested-action:hover,
+window.verst button.flat.suggested-action:hover,
+window.verst .pinbar .linked > button.suggested-action:hover {
+    background-color: shade(@theme_selected_bg_color, 0.92);
+}
+window.verst .activity-bar {
+    background-color: alpha(@theme_fg_color, 0.04);
+    padding: 6px 4px;
+}
+window.verst .activity-bar button.activity-icon {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 6px;
+    margin: 2px 0;
+    border-radius: 10px;
+    background-image: none;
+    background-color: transparent;
+    color: @theme_fg_color;
+    border: none;
+    box-shadow: none;
+    outline: none;
+}
+window.verst .activity-bar button.activity-icon:hover {
+    background-color: alpha(@theme_fg_color, 0.08);
+    color: @theme_fg_color;
+}
+window.verst .activity-bar button.activity-icon.activity-on,
+window.verst .activity-bar button.activity-icon.activity-on:hover,
+window.verst .activity-bar button.activity-icon.activity-on:active,
+window.verst .activity-bar button.activity-icon:active {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+    border-color: transparent;
+}
+window.verst .activity-bar button.activity-tool {
+    min-width: 32px;
+    min-height: 32px;
+    padding: 4px;
+    margin: 2px 0;
+    border-radius: 10px;
+    background-image: none;
+    background-color: transparent;
+    color: @theme_fg_color;
+    border: none;
+    box-shadow: none;
+    outline: none;
+}
+window.verst .activity-bar button.activity-tool:hover,
+window.verst .activity-bar button.activity-tool:active {
+    background-color: alpha(@theme_fg_color, 0.08);
+    color: @theme_fg_color;
+}
+window.verst .activity-bar button.activity-tool:checked,
+window.verst .activity-bar button.activity-tool:checked:hover,
+window.verst .activity-bar button.activity-tool:checked:active {
+    background-color: transparent;
+    color: @theme_selected_bg_color;
+    border-color: transparent;
+}
+window.verst button.suggested-action:disabled {
+    background-color: alpha(@theme_fg_color, 0.12);
+    color: alpha(@theme_fg_color, 0.45);
+    border-color: transparent;
+}
+window.verst entry,
+window.verst dropdown > button {
+    border-radius: 10px;
+}
+window.verst .pinbar .linked > button {
+    border-radius: 0;
+    background-image: none;
+    background-color: alpha(@theme_fg_color, 0.08);
+    color: @theme_fg_color;
+    box-shadow: none;
+    border: 1px solid alpha(@theme_fg_color, 0.16);
+    min-height: 28px;
+    padding: 4px 12px;
+}
+window.verst .pinbar .linked > button:first-child {
+    border-radius: 999px 0 0 999px;
+}
+window.verst .pinbar .linked > button:last-child {
+    border-radius: 0 999px 999px 0;
+    padding: 4px 8px;
+}
+window.verst .side-caption {
+    margin: 10px 12px 2px 12px;
+    font-weight: 600;
+}
+window.verst .notes-bar {
+    margin: 8px 8px 0 8px;
+}
+window.verst .side-search {
+    margin: 8px;
+}
+window.verst .links-page expander {
+    margin: 4px 8px 0 8px;
+}
+window.verst .links-page list {
+    background: transparent;
+}
+window.verst .note-row,
+window.verst button.link-row {
+    margin: 1px 6px;
+}
+window.verst .note-row:hover {
+    background-color: alpha(@theme_fg_color, 0.06);
+}
+window.verst .note-branch {
+    margin-left: 8px;
+}
+window.verst list.navigation-sidebar > row,
+window.verst list.file-list > row,
+window.verst listview.file-list > row,
+window.verst columnview.file-list > listview > row,
+window.verst .sidebar-notebook listview > row,
+window.verst .doc-side listview > row {
+    border-radius: 8px;
+    margin: 1px 6px;
+    background-image: none;
+}
+window.verst list.navigation-sidebar > row:hover,
+window.verst list.file-list > row:hover,
+window.verst listview.file-list > row:hover,
+window.verst columnview.file-list > listview > row:hover {
+    background-color: alpha(@theme_fg_color, 0.06);
+}
+window.verst list.navigation-sidebar > row:selected,
+window.verst list.file-list > row:selected,
+window.verst listview.file-list > row:selected,
+window.verst columnview.file-list > listview > row:selected {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+window.verst .file-row {
+    min-height: 28px;
+}
+window.verst .file-facts {
+    margin: 2px 10px 8px 10px;
+    padding: 8px 10px;
+    border-radius: 12px;
+    background-color: alpha(@theme_fg_color, 0.05);
+    border: 1px solid alpha(@theme_fg_color, 0.06);
+}
+window.verst button.mode-toggle {
+    border-radius: 999px;
+    padding: 8px;
+    background-color: @theme_bg_color;
+    box-shadow: 0 1px 2px alpha(black, 0.16), 0 8px 18px alpha(black, 0.12);
+    opacity: 0.94;
+}
+window.verst button.mode-toggle:hover {
+    opacity: 1;
+    background-color: @theme_bg_color;
+}
+window.verst paned > separator {
+    background-image: none;
+    background-color: alpha(@theme_fg_color, 0.14);
+}
+popover.menu,
+popover.context-menu,
+popover.verst-popover {
+    background-color: transparent;
+    border-radius: 14px;
 }
 popover.menu > contents,
 popover.context-menu > contents,
+popover.verst-popover > contents,
 popover.menu.background > contents,
-popover.context-menu.background > contents {
+popover.context-menu.background > contents,
+popover.verst-popover.background > contents {
     padding: 6px;
-    border-radius: 16px;
+    border-radius: 14px;
     background-image: none;
     background-color: @theme_bg_color;
     box-shadow:
@@ -153,7 +355,9 @@ popover.menu scrolledwindow,
 popover.menu viewport,
 popover.menu stack,
 popover.context-menu scrolledwindow,
-popover.context-menu viewport {
+popover.context-menu viewport,
+popover.verst-popover scrolledwindow,
+popover.verst-popover viewport {
     background-color: transparent;
     background-image: none;
 }
@@ -180,42 +384,47 @@ popover.menu separator {
 popover.context-menu {
     min-width: 220px;
 }
-popover.context-menu button.menu-row {
+popover.context-menu button.menu-row,
+popover.verst-popover button {
     border-radius: 10px;
     padding: 8px 12px;
     margin: 1px 0;
     min-height: 0;
 }
-popover.context-menu button.menu-row:hover {
+popover.context-menu button.menu-row:hover,
+popover.verst-popover button:hover {
     background-color: alpha(@theme_fg_color, 0.08);
 }
-popover.context-menu button.menu-row:active {
-    background-color: alpha(@theme_selected_bg_color, 0.34);
-}
-.file-facts {
-    padding: 8px 10px;
-    border-radius: 12px;
-    background-color: alpha(@theme_fg_color, 0.045);
-}
-entry {
-    border-radius: 10px;
+popover.context-menu button.menu-row:active,
+popover.verst-popover button:active,
+popover.verst-popover button.suggested-action {
+    background-image: none;
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
 }
 window.prompt-dialog {
-    border-radius: 18px;
+    border-radius: 14px;
 }
 window.prompt-dialog headerbar {
-    border-radius: 18px 18px 0 0;
+    border-radius: 14px 14px 0 0;
     border-bottom: none;
+    background: @theme_bg_color;
+    box-shadow: none;
 }
 window.prompt-dialog entry {
     min-height: 34px;
     padding: 6px 12px;
-    border-radius: 12px;
+    border-radius: 10px;
 }
 window.prompt-dialog button {
-    border-radius: 12px;
+    border-radius: 10px;
     padding: 6px 16px;
     min-width: 88px;
+}
+window.prompt-dialog button.suggested-action {
+    background-image: none;
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
 }
 ";
 
@@ -249,11 +458,6 @@ pub(super) struct TreeActions {
     pub(super) mkfile: Rc<dyn Fn(PathBuf)>,
 }
 
-pub(super) struct RowClick {
-    path: PathBuf,
-    at: std::time::Instant,
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum FolderKey {
     Name,
@@ -268,7 +472,8 @@ pub(super) fn folder_columns(directory: &gtk4::DirectoryList) -> gtk4::ColumnVie
     let selection = gtk4::SingleSelection::new(Some(sorted));
     view.set_model(Some(&selection));
     view.set_single_click_activate(false);
-    view.set_show_row_separators(true);
+    view.set_show_row_separators(false);
+    view.add_css_class("file-list");
     view.set_enable_rubberband(true);
     view.set_vexpand(true);
     view.set_hexpand(true);
@@ -304,6 +509,7 @@ pub(super) fn name_column() -> gtk4::ColumnViewColumn {
             return;
         };
         let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        row.set_can_target(false);
         row.set_margin_start(6);
         row.set_margin_end(6);
         let image = gtk4::Image::new();
@@ -373,6 +579,7 @@ pub(super) fn text_column(
             return;
         };
         let label = gtk4::Label::new(None);
+        label.set_can_target(false);
         label.set_halign(align);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         label.set_margin_start(6);
@@ -515,20 +722,25 @@ pub(super) fn file_tree(
         Some(sorted_dir(&child).upcast())
     });
     let selection = gtk4::SingleSelection::new(Some(tree));
-    let last_click = Rc::new(RefCell::new(None::<RowClick>));
-    let factory = tree_factory(actions.clone(), last_click);
+    let factory = tree_factory(actions.clone());
     let list = gtk4::ListView::new(Some(selection), Some(factory));
+    list.add_css_class("file-list");
     list.set_single_click_activate(false);
     list.set_vexpand(true);
     let open = actions.open.clone();
     list.connect_activate(move |list, position| {
-        let Some(path) = list
+        let Some(row) = list
             .model()
             .and_then(|model| model.item(position))
             .and_then(|item| item.downcast::<gtk4::TreeListRow>().ok())
-            .as_ref()
-            .and_then(row_path)
         else {
+            return;
+        };
+        if row.is_expandable() {
+            row.set_expanded(!row.is_expanded());
+            return;
+        }
+        let Some(path) = row_path(&row) else {
             return;
         };
         if path.is_file() {
@@ -570,54 +782,26 @@ pub(super) fn sorted_dir(file: &gio::File) -> gtk4::SortListModel {
     gtk4::SortListModel::new(Some(directory), Some(sorter))
 }
 
-pub(super) fn tree_factory(
-    actions: TreeActions,
-    last_click: Rc<RefCell<Option<RowClick>>>,
-) -> gtk4::SignalListItemFactory {
+pub(super) fn tree_factory(actions: TreeActions) -> gtk4::SignalListItemFactory {
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(move |_, item| {
         let Some(item) = item.downcast_ref::<gtk4::ListItem>() else {
             return;
         };
         let expander = gtk4::TreeExpander::new();
+        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+        row.add_css_class("file-row");
+        row.set_can_target(false);
+        let image = gtk4::Image::new();
+        image.set_pixel_size(16);
         let label = gtk4::Label::new(None);
         label.set_halign(gtk4::Align::Start);
+        label.set_hexpand(true);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        expander.set_child(Some(&label));
+        row.append(&image);
+        row.append(&label);
+        expander.set_child(Some(&row));
         item.set_child(Some(&expander));
-
-        let open = actions.open.clone();
-        let browse = actions.browse.clone();
-        let last_click = last_click.clone();
-        let primary = gtk4::GestureClick::new();
-        primary.set_button(gtk4::gdk::BUTTON_PRIMARY);
-        primary.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        primary.connect_pressed(move |gesture, n_press, _, _| {
-            let Some(widget) = gesture.widget() else {
-                return;
-            };
-            let Some(path) = path_of_row_widget(&widget) else {
-                return;
-            };
-            let now = std::time::Instant::now();
-            let repeated = last_click.borrow().as_ref().is_some_and(|click| {
-                click.path == path && now.duration_since(click.at) <= Duration::from_millis(450)
-            });
-            *last_click.borrow_mut() = Some(RowClick {
-                path: path.clone(),
-                at: now,
-            });
-            if n_press < 2 && !repeated {
-                return;
-            }
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-            if path.is_file() {
-                open(path);
-            } else {
-                browse(path);
-            }
-        });
-        expander.add_controller(primary);
 
         let menu_actions = actions.clone();
         let secondary = gtk4::GestureClick::new();
@@ -651,13 +835,37 @@ pub(super) fn tree_factory(
             return;
         };
         expander.set_list_row(Some(&row));
-        if let Some(label) = expander
+        let Some(line) = expander
             .child()
+            .and_then(|child| child.downcast::<gtk4::Box>().ok())
+        else {
+            return;
+        };
+        let info = row
+            .item()
+            .and_then(|item| item.downcast::<gio::FileInfo>().ok());
+        if let Some(image) = line
+            .first_child()
+            .and_then(|child| child.downcast::<gtk4::Image>().ok())
+        {
+            if let Some(info) = info.as_ref() {
+                if let Some(icon) = info.symbolic_icon() {
+                    image.set_from_gicon(&icon);
+                } else if info.file_type() == gio::FileType::Directory {
+                    image.set_icon_name(Some("folder-symbolic"));
+                } else {
+                    image.set_icon_name(Some("text-x-generic-symbolic"));
+                }
+            } else {
+                image.set_icon_name(Some("text-x-generic-symbolic"));
+            }
+        }
+        if let Some(label) = line
+            .last_child()
             .and_then(|child| child.downcast::<gtk4::Label>().ok())
         {
-            let name = row
-                .item()
-                .and_then(|item| item.downcast::<gio::FileInfo>().ok())
+            let name = info
+                .as_ref()
                 .map(|info| info.display_name().to_string())
                 .unwrap_or_default();
             label.set_text(&name);
@@ -1099,6 +1307,28 @@ pub(super) fn row_path(row: &gtk4::TreeListRow) -> Option<PathBuf> {
     file.path()
 }
 
+pub(super) fn cycle_index(len: usize, current: Option<usize>, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match current {
+        Some(index) if index < len && forward => (index + 1) % len,
+        Some(index) if index < len => (index + len - 1) % len,
+        _ => 0,
+    })
+}
+
+pub(super) fn selected_tree_row(list: &gtk4::ListView) -> Option<gtk4::TreeListRow> {
+    let model = list
+        .model()
+        .and_then(|model| model.downcast::<gtk4::SingleSelection>().ok())?;
+    let position = model.selected();
+    if position == gtk4::INVALID_LIST_POSITION {
+        return None;
+    }
+    model.item(position)?.downcast::<gtk4::TreeListRow>().ok()
+}
+
 pub(super) fn menu_row(title: &str) -> gtk4::Button {
     let button = gtk4::Button::with_label(title);
     button.set_has_frame(false);
@@ -1141,11 +1371,14 @@ pub(super) fn notebook_for(
 ) -> gtk4::Notebook {
     let notebook = gtk4::Notebook::new();
     notebook.set_vexpand(true);
+    notebook.set_scrollable(true);
     for spec in seams::panels().iter().filter(|panel| panel.side == side) {
         let Some((_, child)) = pages.iter().find(|(id, _)| *id == spec.id) else {
             continue;
         };
+        child.set_widget_name(spec.id);
         notebook.append_page(child, Some(&gtk4::Label::new(Some(spec.title))));
+        notebook.page(child).set_reorderable(true);
     }
     notebook
 }
@@ -1167,6 +1400,88 @@ pub(super) fn shell_link(link: markdown::LocalLink) -> String {
     }
 }
 
+pub(super) fn dock_pin(tip: &str) -> gtk4::ToggleButton {
+    let button = gtk4::ToggleButton::new();
+    button.set_icon_name("view-pin-symbolic");
+    button.add_css_class("flat");
+    button.set_tooltip_text(Some(tip));
+    button
+}
+
+pub(super) fn activity_icon(id: &str, hint: &str, icon: &str) -> gtk4::Button {
+    let button = gtk4::Button::from_icon_name(icon);
+    button.set_widget_name(id);
+    button.add_css_class("flat");
+    button.add_css_class("activity-icon");
+    button.set_focus_on_click(false);
+    button.set_has_tooltip(true);
+    button.set_tooltip_text(Some(hint));
+    if let Some(image) = button.child().and_downcast::<gtk4::Image>() {
+        image.set_pixel_size(20);
+        image.set_can_target(false);
+    }
+    button
+}
+
+pub(super) fn dock_icon(icon: &str, tip: &str) -> gtk4::Button {
+    let button = gtk4::Button::from_icon_name(icon);
+    button.add_css_class("flat");
+    button.set_tooltip_text(Some(tip));
+    button
+}
+
+pub(super) fn dock_rail(
+    open_icon: &str,
+    open_tip: &str,
+    pin_tip: &str,
+) -> (gtk4::Box, gtk4::Button, gtk4::ToggleButton) {
+    let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    rail.add_css_class("side-rail");
+    rail.set_width_request(40);
+    rail.set_visible(false);
+    let open = dock_icon(open_icon, open_tip);
+    let pin = dock_pin(pin_tip);
+    rail.append(&open);
+    rail.append(&pin);
+    (rail, open, pin)
+}
+
+pub(super) fn notebook_page_id(notebook: &gtk4::Notebook, index: u32) -> Option<String> {
+    let page = notebook.nth_page(Some(index))?;
+    let name = page.widget_name();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+pub(super) fn notebook_index_of(notebook: &gtk4::Notebook, id: &str) -> Option<u32> {
+    (0..notebook.n_pages()).find(|index| {
+        notebook
+            .nth_page(Some(*index))
+            .is_some_and(|page| page.widget_name() == id)
+    })
+}
+
+pub(super) fn notebook_order(notebook: &gtk4::Notebook) -> Vec<String> {
+    (0..notebook.n_pages())
+        .filter_map(|index| notebook_page_id(notebook, index))
+        .collect()
+}
+
+pub(super) fn apply_notebook_order(notebook: &gtk4::Notebook, order: &[String]) {
+    for (position, id) in order.iter().enumerate() {
+        let Some(index) = notebook_index_of(notebook, id) else {
+            continue;
+        };
+        let Some(page) = notebook.nth_page(Some(index)) else {
+            continue;
+        };
+        notebook.page(&page).set_position(position as i32);
+    }
+}
+
 pub(super) fn tip_tab(notebook: &gtk4::Notebook, index: u32, text: &str) {
     let Some(page) = notebook.nth_page(Some(index)) else {
         return;
@@ -1181,20 +1496,43 @@ pub(super) fn replace_notebook_page(
     index: u32,
     child: &impl IsA<gtk4::Widget>,
 ) {
-    let title = notebook
-        .tab_label(
-            &notebook
-                .nth_page(Some(index))
-                .unwrap_or_else(|| child.as_ref().clone()),
-        )
+    let old = notebook.nth_page(Some(index));
+    let name = old
+        .as_ref()
+        .map(|page| page.widget_name())
+        .unwrap_or_default();
+    let title = old
+        .as_ref()
+        .and_then(|page| notebook.tab_label(page))
         .and_then(|label| label.downcast::<gtk4::Label>().ok())
         .map(|label| label.text().to_string())
-        .unwrap_or_else(|| "Диск".to_string());
-    if let Some(page) = notebook.nth_page(Some(index)) {
+        .unwrap_or_else(|| "Проводник".to_string());
+    let tip = old
+        .as_ref()
+        .and_then(|page| notebook.tab_label(page))
+        .and_then(|label| label.tooltip_text());
+    if old.is_some() {
         notebook.remove_page(Some(index));
-        let _ = page;
     }
-    notebook.insert_page(child, Some(&gtk4::Label::new(Some(&title))), Some(index));
+    if !name.is_empty() {
+        child.set_widget_name(&name);
+    }
+    let tab = gtk4::Label::new(Some(&title));
+    if let Some(tip) = tip {
+        tab.set_tooltip_text(Some(&tip));
+    }
+    notebook.insert_page(child, Some(&tab), Some(index));
+    notebook.page(child).set_reorderable(true);
+}
+
+pub(super) fn file_icon(path: &Path) -> gtk4::Image {
+    let image = gtk4::Image::from_icon_name(if path.is_dir() {
+        "folder-symbolic"
+    } else {
+        "text-x-generic-symbolic"
+    });
+    image.set_pixel_size(16);
+    image
 }
 
 pub(super) fn side_caption(text: &str) -> gtk4::Label {
@@ -1588,6 +1926,15 @@ pub(super) fn file_label(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spaces_cycle() {
+        assert_eq!(cycle_index(0, None, true), None);
+        assert_eq!(cycle_index(3, None, true), Some(0));
+        assert_eq!(cycle_index(3, Some(0), true), Some(1));
+        assert_eq!(cycle_index(3, Some(2), true), Some(0));
+        assert_eq!(cycle_index(3, Some(0), false), Some(2));
+    }
 
     #[test]
     fn about_rows_describe_a_markdown_note() {
