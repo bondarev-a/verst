@@ -244,11 +244,46 @@ fn ensure_ctx(app: &gtk4::Application) -> Ctx {
 
 pub fn activate(app: &gtk4::Application) {
     let ctx = ensure_ctx(app);
+    ctx.widgets.window.unminimize();
     ctx.widgets.window.present();
+}
+
+/// Сессия хранит размер с большого монитора. Окно больше самого маленького
+/// экрана композитор кладёт туда целиком, и на ноутбуке его не видно.
+fn fitted_size(width: i32, height: i32) -> (i32, i32) {
+    let Some(display) = gtk4::gdk::Display::default() else {
+        return (width, height);
+    };
+    let monitors = display.monitors();
+    let mut limit_w = i32::MAX;
+    let mut limit_h = i32::MAX;
+    for index in 0..monitors.n_items() {
+        let Some(monitor) = monitors
+            .item(index)
+            .and_then(|item| item.downcast::<gtk4::gdk::Monitor>().ok())
+        else {
+            continue;
+        };
+        let geo = monitor.geometry();
+        if geo.width() > 0 && geo.height() > 0 {
+            limit_w = limit_w.min(geo.width());
+            limit_h = limit_h.min(geo.height());
+        }
+    }
+    if limit_w == i32::MAX {
+        return (width, height);
+    }
+    let limit_w = (limit_w - 80).max(session::MIN_WINDOW_WIDTH);
+    let limit_h = (limit_h - 120).max(session::MIN_WINDOW_HEIGHT);
+    (
+        width.clamp(session::MIN_WINDOW_WIDTH, limit_w),
+        height.clamp(session::MIN_WINDOW_HEIGHT, limit_h),
+    )
 }
 
 pub fn open_files(app: &gtk4::Application, files: &[gio::File], _hint: &str) {
     let ctx = ensure_ctx(app);
+    ctx.widgets.window.unminimize();
     ctx.widgets.window.present();
     let mut opened = false;
     for file in files {
@@ -731,11 +766,12 @@ impl Ctx {
         root.append(&status);
 
         let header = gtk4::HeaderBar::new();
+        let (window_width, window_height) = fitted_size(session.window_width, session.window_height);
         let window = gtk4::ApplicationWindow::builder()
             .application(app)
             .title(APP_TITLE)
-            .default_width(session.window_width)
-            .default_height(session.window_height)
+            .default_width(window_width)
+            .default_height(window_height)
             .child(&root)
             .titlebar(&header)
             .show_menubar(true) // единственная строка «Файл / Правка / Вид», в заголовке окна

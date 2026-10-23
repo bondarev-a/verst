@@ -1861,20 +1861,27 @@ pub(super) fn install_launcher_icon() -> Option<PathBuf> {
         fs::write(&icon_path, LAUNCHER_ICON).ok()?;
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("text_workspace"));
+    let exec = if exe == Path::new("/usr/bin/verst") {
+        format!("{} %U", exe.display())
+    } else {
+        format!(
+            "env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 {} %U",
+            exe.display()
+        )
+    };
     let desktop = format!(
         "[Desktop Entry]\n\
 Type=Application\n\
 Name=Verst\n\
 GenericName=Text Workspace\n\
 Comment=Исходник и страница одного файла\n\
-Exec={exec} %U\n\
+Exec={exec}\n\
 Icon={icon}\n\
 Terminal=false\n\
 Categories=Utility;TextEditor;\n\
 MimeType=text/plain;text/markdown;text/x-markdown;\n\
 StartupWMClass=local.textworkspace\n\
 Keywords=markdown;notes;editor;\n",
-        exec = exe.display(),
         icon = icon_path.display(),
     );
     if fs::read_to_string(&desktop_path).ok().as_deref() != Some(desktop.as_str()) {

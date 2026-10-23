@@ -164,7 +164,9 @@ install_user() {
   install -m 0755 "$binary" "$HOME/.local/bin/verst"
   install -m 0644 "$here/verst.png" "$HOME/.local/share/icons/hicolor/256x256/apps/verst.png"
   desktop="$HOME/.local/share/applications/local.textworkspace.desktop"
-  sed "s|^Exec=.*|Exec=$HOME/.local/bin/verst %U|" \
+  # Профиль AppArmor закрывает только /usr/bin/verst. Локальный бинарник
+  # без этого переменного окружения падает в bwrap: Permission denied.
+  sed "s|^Exec=.*|Exec=env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 $HOME/.local/bin/verst %U|" \
     "$here/local.textworkspace.desktop" >"$desktop"
   chmod 0644 "$desktop"
   if command -v update-desktop-database >/dev/null 2>&1; then
