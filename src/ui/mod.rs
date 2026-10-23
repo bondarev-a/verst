@@ -136,6 +136,8 @@ struct State {
     backlinks: Vec<PathBuf>,
     tag_query: Option<String>,
     nav: places::NavHistory,
+    /// Каталог, выбранный щелчком в дереве. Пока пусто — каталог открытого файла.
+    nav_dir: Option<PathBuf>,
     browsing: bool,
     mode_tick: u64,
 }
@@ -200,6 +202,7 @@ struct Widgets {
     disk_list: Rc<RefCell<Option<gtk4::ListView>>>,
     workspace_list: Rc<RefCell<Option<gtk4::ListView>>>,
     path_label: gtk4::Label,
+    nav_path: gtk4::Label,
     back_button: gtk4::Button,
     forward_button: gtk4::Button,
     doc_label: gtk4::Label,
@@ -466,8 +469,21 @@ impl Ctx {
         left.set_hexpand(true);
         left.set_vexpand(true);
         left_shell.set_overflow(gtk4::Overflow::Hidden);
+        let nav_path = gtk4::Label::new(None);
+        nav_path.add_css_class("path-label");
+        nav_path.add_css_class("nav-path");
+        nav_path.set_halign(gtk4::Align::Start);
+        nav_path.set_xalign(0.0);
+        nav_path.set_hexpand(true);
+        nav_path.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+        nav_path.set_visible(false);
+        let nav_column = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        nav_column.set_hexpand(true);
+        nav_column.set_vexpand(true);
+        nav_column.append(&nav_path);
+        nav_column.append(&left);
         left_shell.append(&activity_bar);
-        left_shell.append(&left);
+        left_shell.append(&nav_column);
 
         let scroll1 = scrolled(&views[0]);
         scroll1.set_width_request(420);
@@ -727,7 +743,7 @@ impl Ctx {
         let path_label = gtk4::Label::new(None);
         path_label.set_halign(gtk4::Align::Start);
         path_label.set_hexpand(true);
-        path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
         path_label.set_margin_start(8);
         path_label.add_css_class("path-label");
         let back_button = gtk4::Button::from_icon_name("go-previous-symbolic");
@@ -759,9 +775,15 @@ impl Ctx {
         status.add_css_class("statusbar");
 
         let menubar = gtk4::PopoverMenuBar::from_model(None::<&gio::MenuModel>);
+        let file_column = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        file_column.set_hexpand(true);
+        file_column.set_vexpand(true);
+        right_paned.set_start_child(None::<&gtk4::Widget>);
+        file_column.append(&path_row);
+        file_column.append(&content);
+        right_paned.set_start_child(Some(&file_column));
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         root.append(&pin_box);
-        root.append(&path_row);
         root.append(&main);
         root.append(&status);
 
@@ -853,6 +875,7 @@ impl Ctx {
             disk_list: Rc::new(RefCell::new(None)),
             workspace_list: Rc::new(RefCell::new(None)),
             path_label,
+            nav_path,
             back_button,
             forward_button,
             doc_label,
@@ -896,6 +919,7 @@ impl Ctx {
                 backlinks: Vec::new(),
                 tag_query: None,
                 nav: places::NavHistory::default(),
+                nav_dir: None,
                 browsing: false,
                 mode_tick: 0,
             })),
@@ -1051,8 +1075,10 @@ impl Ctx {
                 state.session.left_page = page_index;
                 let notes = id == "notes";
                 drop(state);
+                ctx.state.borrow_mut().nav_dir = None;
                 ctx.save_session();
                 ctx.sync_activity();
+                ctx.refresh_nav_path();
                 if notes {
                     ctx.refresh_notes();
                 }
@@ -1533,6 +1559,7 @@ impl Ctx {
 
     fn mount_disk(&self) {
         let (scroll, list) = file_tree(Path::new("/"), self.tree_actions());
+        self.watch_tree_directory(&list);
         *self.widgets.disk_list.borrow_mut() = Some(list);
         let index = notebook_index_of(&self.widgets.left_notebook, "disk").unwrap_or(0);
         replace_notebook_page(&self.widgets.left_notebook, index, &scroll);
@@ -1542,6 +1569,7 @@ impl Ctx {
         clear_box(&self.widgets.workspace_slot);
         let Some(pin) = self.pin_path() else {
             *self.widgets.workspace_list.borrow_mut() = None;
+            self.refresh_nav_path();
             let label = gtk4::Label::new(Some(
                 "Запините каталог из меню файла или правой кнопкой в дереве",
             ));
@@ -1553,9 +1581,11 @@ impl Ctx {
             return;
         };
         let (scroll, list) = file_tree(&pin, self.tree_actions());
+        self.watch_tree_directory(&list);
         *self.widgets.workspace_list.borrow_mut() = Some(list);
         scroll.set_vexpand(true);
         self.widgets.workspace_slot.append(&scroll);
+        self.refresh_nav_path();
     }
 
     fn reveal_focused(&self, place: TreePlace) {
@@ -2063,13 +2093,14 @@ impl Ctx {
     }
 
     fn follow_focus(&self) {
+        self.state.borrow_mut().nav_dir = None;
         self.apply_saved_mode();
         let path = self.focused_path();
         match &path {
             Some(path) => {
-                self.widgets
-                    .path_label
-                    .set_text(&path.display().to_string());
+                let shown = path.display().to_string();
+                self.widgets.path_label.set_text(&shown);
+                self.widgets.path_label.set_tooltip_text(Some(&shown));
                 self.widgets.window.set_title(Some(&format!(
                     "{} — {APP_TITLE}",
                     file_label(path)
@@ -2081,6 +2112,7 @@ impl Ctx {
             }
             None => {
                 self.widgets.path_label.set_text("");
+                self.widgets.path_label.set_tooltip_text(None);
                 self.widgets.window.set_title(Some(APP_TITLE));
                 self.widgets.doc_label.set_text("Файл не открыт");
                 self.widgets.doc_label.set_tooltip_text(None);
@@ -2283,6 +2315,7 @@ impl Ctx {
     }
 
     fn apply_view_mode(&self) {
+        self.refresh_nav_path();
         if self.state.borrow().browsing {
             self.widgets.content_stack.set_visible_child_name("folder");
             self.widgets
@@ -3505,7 +3538,12 @@ impl Ctx {
         // shrink выключен: ниже минимума панель не сдвигается за край окна.
         self.widgets.main_paned.set_shrink_start_child(false);
         self.widgets.main_paned.set_resize_start_child(open);
-        if let Some(shell) = self.widgets.left_notebook.parent() {
+        if let Some(shell) = self
+            .widgets
+            .left_notebook
+            .parent()
+            .and_then(|column| column.parent())
+        {
             shell.set_width_request(if open {
                 session::NAV_MIN_WIDTH + session::ACTIVITY_WIDTH
             } else {
@@ -3528,6 +3566,7 @@ impl Ctx {
             self.place_paned(&self.widgets.main_paned, session::ACTIVITY_WIDTH);
         }
         self.sync_activity();
+        self.refresh_nav_path();
     }
 
     fn sync_activity(&self) {
@@ -3539,6 +3578,107 @@ impl Ctx {
                 button.remove_css_class("activity-on");
             }
         }
+    }
+
+    fn watch_tree_directory(&self, list: &gtk4::ListView) {
+        let ctx = self.clone();
+        let click = gtk4::GestureClick::new();
+        click.set_button(gtk4::gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk4::PropagationPhase::Bubble);
+        click.connect_released(move |gesture, _, _, _| {
+            let Some(list) = gesture
+                .widget()
+                .and_then(|widget| widget.downcast::<gtk4::ListView>().ok())
+            else {
+                return;
+            };
+            ctx.remember_tree_directory(&list);
+        });
+        list.add_controller(click);
+        let ctx = self.clone();
+        list.connect_activate(move |list, _| ctx.remember_tree_directory(list));
+    }
+
+    fn remember_tree_directory(&self, list: &gtk4::ListView) {
+        let Some(dir) = tree_directory(list) else {
+            return;
+        };
+        self.state.borrow_mut().nav_dir = Some(dir);
+        self.refresh_nav_path();
+    }
+
+    /// Каталог левой панели: выбранная строка дерева, иначе каталог открытого файла.
+    fn refresh_nav_path(&self) {
+        let (open, panel) = {
+            let session = &self.state.borrow().session;
+            (session.nav_open, session.left_panel.clone())
+        };
+        if !open {
+            self.widgets.nav_path.set_visible(false);
+            return;
+        }
+        let (text, tip) = match panel.as_str() {
+            "disk" => {
+                let text = self.disk_directory().display().to_string();
+                (text.clone(), Some(text))
+            }
+            "workspace" => match self.workspace_directory() {
+                Some(path) => {
+                    let text = path.display().to_string();
+                    (text.clone(), Some(text))
+                }
+                None => ("Пространство не выбрано".to_string(), None),
+            },
+            "notes" => {
+                let text = text_workspace::notes::notes_dir().display().to_string();
+                (text.clone(), Some(text))
+            }
+            _ => {
+                self.widgets.nav_path.set_visible(false);
+                return;
+            }
+        };
+        self.widgets.nav_path.set_text(&text);
+        self.widgets.nav_path.set_tooltip_text(tip.as_deref());
+        self.widgets.nav_path.set_visible(true);
+    }
+
+    fn disk_directory(&self) -> PathBuf {
+        if let Some(dir) = self.state.borrow().nav_dir.clone() {
+            return dir;
+        }
+        if self.state.borrow().browsing {
+            if let Some(dir) = self.widgets.folder_dir.file().and_then(|file| file.path()) {
+                return dir;
+            }
+        }
+        if let Some(dir) = self
+            .focused_path()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        {
+            if !dir.as_os_str().is_empty() {
+                return dir;
+            }
+        }
+        PathBuf::from("/")
+    }
+
+    fn workspace_directory(&self) -> Option<PathBuf> {
+        let pin = self.pin_path()?;
+        if let Some(dir) = self.state.borrow().nav_dir.clone() {
+            if dir.starts_with(&pin) {
+                return Some(dir);
+            }
+        }
+        if let Some(dir) = self
+            .focused_path()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        {
+            if dir.starts_with(&pin) {
+                return Some(dir);
+            }
+        }
+        Some(pin)
     }
 
     fn nav_floor(&self, paned: &gtk4::Paned) -> i32 {

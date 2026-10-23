@@ -1,6 +1,6 @@
 # Verst
 
-Версия 0.4.0.
+Версия 0.4.1.
 
 Локальный редактор текстовых файлов с навигацией уровня IDE. В меню и на ярлыке программа называется Verst: слева исходник, справа уже собранная страница. Иконка лежит в `packaging/verst.png`. Основной формат — Markdown, остальные текстовые файлы тоже открываются. Обход сразу по всему диску; каталог можно запинить как пространство. Поиск, входящие ссылки и граф считаются внутри активного пина. Исходящие ссылки открытого файла берутся из его текста и ведут в тот запиненный каталог, где лежит файл.
 
@@ -28,7 +28,7 @@
 Готовый файл `verst_<версия>_amd64.deb` ставится так:
 
 ```bash
-sudo apt install ./verst_0.4.0_amd64.deb
+sudo apt install ./verst_0.4.1_amd64.deb
 ```
 
 После установки программа называется `verst` и появляется в меню.
@@ -41,7 +41,7 @@ sudo apt install ./verst_0.4.0_amd64.deb
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 sudo apt install pkg-config libgtk-4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev
 ./packaging/install_ubuntu.sh --deb
-sudo apt install ./packaging/out/verst_0.4.0_amd64.deb
+sudo apt install ./packaging/out/verst_0.4.1_amd64.deb
 ```
 
 `./packaging/install_ubuntu.sh --deb` только собирает пакет в `packaging/out/` и ничего не ставит. Без флага скрипт ещё копирует программу в `~/.local/bin` и ставит ярлык в меню текущего пользователя. `./packaging/install_ubuntu.sh --system` ставит пакет в систему через apt.

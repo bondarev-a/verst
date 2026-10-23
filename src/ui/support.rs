@@ -56,8 +56,19 @@ window.verst .explorer-bar {
     background-color: alpha(@theme_fg_color, 0.05);
     border: 1px solid alpha(@theme_fg_color, 0.06);
 }
-window.verst .pathbar .path-label {
+window.verst .pathbar .path-label,
+window.verst .nav-path {
     font-family: monospace;
+}
+window.verst .workspace-main .pathbar {
+    margin: 0 0 6px 0;
+}
+window.verst .nav-path {
+    margin: 0 8px 6px 0;
+    padding: 4px 8px;
+    border-radius: 12px;
+    background-color: alpha(@theme_fg_color, 0.05);
+    border: 1px solid alpha(@theme_fg_color, 0.06);
 }
 window.verst .statusbar {
     margin: 6px 16px 8px 16px;
@@ -722,6 +733,7 @@ pub(super) fn file_tree(
         Some(sorted_dir(&child).upcast())
     });
     let selection = gtk4::SingleSelection::new(Some(tree));
+    selection.set_autoselect(false);
     let factory = tree_factory(actions.clone());
     let list = gtk4::ListView::new(Some(selection), Some(factory));
     list.add_css_class("file-list");
@@ -1316,6 +1328,17 @@ pub(super) fn cycle_index(len: usize, current: Option<usize>, forward: bool) -> 
         Some(index) if index < len => (index + len - 1) % len,
         _ => 0,
     })
+}
+
+pub(super) fn tree_directory(list: &gtk4::ListView) -> Option<PathBuf> {
+    let path = row_path(&selected_tree_row(list)?)?;
+    if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .filter(|dir| !dir.as_os_str().is_empty())
+    }
 }
 
 pub(super) fn selected_tree_row(list: &gtk4::ListView) -> Option<gtk4::TreeListRow> {
