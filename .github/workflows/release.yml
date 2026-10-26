@@ -1,0 +1,43 @@
+name: Пакет Ubuntu
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Собрать и выложить deb
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Код
+        uses: actions/checkout@v4
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Заголовки GTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev dpkg-dev
+
+      - name: Пакет
+        run: ./packaging/install_ubuntu.sh --deb
+
+      - name: Релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          asset="packaging/out/verst_${version}_amd64.deb"
+          tag="v${version}"
+          notes="Готовый пакет для Ubuntu 24.04 и новее, архитектура amd64. Компилятор не нужен.
+
+          sudo apt install ./verst_${version}_amd64.deb"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" --title "Verst ${version}" --notes "$notes"
+          fi
