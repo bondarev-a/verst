@@ -1050,6 +1050,44 @@ impl Ctx {
         }
     }
 
+    fn install_external_drop(&self) {
+        let target = gtk4::DropTarget::new(
+            gtk4::gdk::FileList::static_type(),
+            gtk4::gdk::DragAction::COPY,
+        );
+        target.set_types(&[
+            gtk4::gdk::FileList::static_type(),
+            gio::File::static_type(),
+        ]);
+        let ctx = self.clone();
+        target.connect_drop(move |_, value, _, _| ctx.accept_dropped_files(value));
+        self.widgets.window.add_controller(target);
+    }
+
+    fn accept_dropped_files(&self, value: &glib::Value) -> bool {
+        let files = if let Ok(list) = value.get::<gtk4::gdk::FileList>() {
+            list.files()
+        } else if let Ok(file) = value.get::<gio::File>() {
+            vec![file]
+        } else {
+            return false;
+        };
+        let mut opened = false;
+        for file in files {
+            let Some(path) = file.path() else {
+                continue;
+            };
+            if path.is_file() {
+                self.go(path, None);
+                opened = true;
+            }
+        }
+        if !opened {
+            self.set_status("Не удалось открыть перетащенный файл");
+        }
+        opened
+    }
+
     fn action(&self, app: &gtk4::Application, name: &str, run: impl Fn(Ctx) + 'static) {
         let ctx = self.clone();
         let action = gio::SimpleAction::new(name, None);
@@ -1058,6 +1096,7 @@ impl Ctx {
     }
 
     fn bind(&self) {
+        self.install_external_drop();
         let ctx = self.clone();
         self.widgets.window.connect_close_request(move |_| {
             ctx.save_session();

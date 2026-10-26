@@ -814,6 +814,7 @@ pub(super) fn tree_factory(actions: TreeActions) -> gtk4::SignalListItemFactory 
         row.append(&label);
         expander.set_child(Some(&row));
         item.set_child(Some(&expander));
+        expander.add_controller(file_drag_source());
 
         let menu_actions = actions.clone();
         let secondary = gtk4::GestureClick::new();
@@ -907,6 +908,20 @@ pub(super) fn caption(title: &str, child: &impl IsA<gtk4::Widget>) -> gtk4::Box 
     box_.set_hexpand(true);
     box_.set_vexpand(true);
     box_
+}
+
+/// Файл из строки дерева уходит наружу как список URI, его берут файловые менеджеры.
+fn file_drag_source() -> gtk4::DragSource {
+    let source = gtk4::DragSource::new();
+    source.set_actions(gtk4::gdk::DragAction::COPY);
+    source.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    source.connect_prepare(|source, _, _| {
+        let path = source.widget().as_ref().and_then(path_of_row_widget)?;
+        let file = gio::File::for_path(&path);
+        let list = gtk4::gdk::FileList::from_array(&[file]);
+        Some(gtk4::gdk::ContentProvider::for_value(&list.to_value()))
+    });
+    source
 }
 
 pub(super) fn tree_row_of_widget(widget: &gtk4::Widget) -> Option<gtk4::TreeListRow> {
