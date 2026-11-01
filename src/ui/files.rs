@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::prelude::*;
@@ -146,11 +148,13 @@ impl Ctx {
         self.apply_language(&buffer, path);
         self.apply_scheme(&buffer);
         let ctx = self.clone();
-        let watch = path.to_path_buf();
+        let identity = Rc::new(RefCell::new(path.to_path_buf()));
+        let watch_id = identity.clone();
         buffer.connect_changed(move |_| {
             if ctx.state.borrow().loading {
                 return;
             }
+            let watch = watch_id.borrow().clone();
             let became_dirty =
                 ctx.state
                     .borrow_mut()
@@ -162,7 +166,7 @@ impl Ctx {
                         entry.acked_external = None;
                         !was
                     });
-            ctx.schedule_autosave(watch.clone());
+            ctx.schedule_autosave(watch);
             if became_dirty {
                 ctx.refresh_open_list();
             }
@@ -178,6 +182,7 @@ impl Ctx {
                 dirty: false,
                 last_saved: text,
                 acked_external: None,
+                identity,
                 monitor,
             },
         );
@@ -189,6 +194,154 @@ impl Ctx {
             return;
         };
         self.write_file(&path, false);
+    }
+
+    pub(super) fn save_as(&self) {
+        let Some(source) = self.focused_path() else {
+            self.set_status("Нет открытого файла");
+            return;
+        };
+        if !kind::is_text(&source) {
+            self.set_status("Сохранить как записывает текстовый файл");
+            return;
+        }
+        if self.buffer_text(&source).is_none() {
+            self.set_status("Файл ещё не прочитан");
+            return;
+        }
+        let parent = source
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file.txt");
+        let dialog = gtk4::FileDialog::builder()
+            .title("Сохранить как")
+            .modal(true)
+            .accept_label("Сохранить")
+            .initial_name(name)
+            .build();
+        dialog.set_initial_folder(Some(&gio::File::for_path(&parent)));
+        let ctx = self.clone();
+        let window = self.widgets.window.clone();
+        dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+            let Ok(file) = result else {
+                return;
+            };
+            let Some(dest) = file.path() else {
+                return;
+            };
+            ctx.finish_save_as(&source, dest);
+        });
+    }
+
+    fn finish_save_as(&self, source: &Path, dest: PathBuf) {
+        if dest.is_dir() {
+            self.set_status("Выберите файл");
+            return;
+        }
+        if same_file(source, &dest) {
+            self.write_file(source, false);
+            return;
+        }
+        if self
+            .state
+            .borrow()
+            .buffers
+            .get(&dest)
+            .is_some_and(|entry| entry.dirty)
+        {
+            self.set_status("Файл с этим именем открыт и не сохранён");
+            return;
+        }
+        let Some(text) = self.buffer_text(source) else {
+            self.set_status("Файл ещё не прочитан");
+            return;
+        };
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() && !parent.is_dir() {
+                self.set_status("Каталог для файла не найден");
+                return;
+            }
+        }
+        if let Err(error) = write_atomic(&dest, &text) {
+            self.set_status(&format!("Не удалось записать файл: {error}"));
+            return;
+        }
+        self.adopt_saved_path(source, &dest, &text);
+    }
+
+    fn adopt_saved_path(&self, source: &Path, dest: &Path, text: &str) {
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(id) = state.autosave.remove(source) {
+                id.remove();
+            }
+            if let Some(id) = state.autosave.remove(dest) {
+                id.remove();
+            }
+        }
+        let Some(mut entry) = self.state.borrow_mut().buffers.remove(source) else {
+            self.open_file(dest.to_path_buf(), true);
+            self.set_status(&format!("Сохранено как {}", dest.display()));
+            return;
+        };
+        self.state.borrow_mut().buffers.remove(dest);
+        *entry.identity.borrow_mut() = dest.to_path_buf();
+        entry.dirty = false;
+        entry.last_saved = text.to_string();
+        entry.acked_external = None;
+        entry.monitor = watch_file(dest, self.clone());
+        self.apply_language(&entry.buffer, dest);
+        let buffer = entry.buffer.clone();
+        self.state
+            .borrow_mut()
+            .buffers
+            .insert(dest.to_path_buf(), entry);
+        let mode = self.state.borrow().view_mode;
+        {
+            let mut state = self.state.borrow_mut();
+            state
+                .session
+                .open_files
+                .retain(|open| open != source && open != dest);
+            state.session.open_files.push(dest.to_path_buf());
+            for pane in &mut state.session.pane_paths {
+                if pane.as_deref() == Some(source) || pane.as_deref() == Some(dest) {
+                    *pane = Some(dest.to_path_buf());
+                }
+            }
+            for place in &mut state.session.carets {
+                if place.path == source {
+                    place.path = dest.to_path_buf();
+                }
+            }
+            state.session.remember_mode(dest.to_path_buf(), mode);
+            places::remember(&mut state.session.recent_files, dest.to_path_buf());
+        }
+        for pane in 0..2 {
+            let shows = self
+                .state
+                .borrow()
+                .session
+                .pane_paths
+                .get(pane)
+                .cloned()
+                .flatten();
+            if shows.as_deref() == Some(dest) {
+                self.widgets.views[pane].set_buffer(Some(&buffer));
+                self.apply_profile(&self.widgets.views[pane]);
+            }
+        }
+        if source.starts_with(notes::notes_dir()) || dest.starts_with(notes::notes_dir()) {
+            self.refresh_notes();
+        }
+        self.follow_focus();
+        self.save_session();
+        self.set_status(&format!("Сохранено как {}", dest.display()));
     }
 
     pub(super) fn schedule_autosave(&self, path: PathBuf) {
@@ -310,5 +463,15 @@ impl Ctx {
         self.refresh_open_list();
         self.follow_focus();
         self.set_status("Файл перечитан с диска");
+    }
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }

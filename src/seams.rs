@@ -25,6 +25,18 @@ const COMMANDS: &[CommandSpec] = &[
         accels: &["<Control>s"],
     },
     CommandSpec {
+        id: "save_as",
+        title: "Сохранить как",
+        section: "Файл",
+        accels: &["<Control><Shift>s"],
+    },
+    CommandSpec {
+        id: "save_pdf",
+        title: "Сохранить PDF",
+        section: "Файл",
+        accels: &[],
+    },
+    CommandSpec {
         id: "quick_note",
         title: "Быстрая заметка",
         section: "Файл",
@@ -332,6 +344,11 @@ mod tests {
     fn zoom_and_save_have_accelerators() {
         let save = commands().iter().find(|c| c.id == "save").unwrap();
         assert!(save.accels.iter().any(|a| a.contains("<Control>s")));
+        let save_as = commands().iter().find(|c| c.id == "save_as").unwrap();
+        assert!(save_as
+            .accels
+            .iter()
+            .any(|a| a.contains("<Control><Shift>s")));
         let zoom_in = commands().iter().find(|c| c.id == "zoom_in").unwrap();
         assert!(zoom_in.accels.iter().any(|a| a.contains("plus")));
         let zoom_out = commands().iter().find(|c| c.id == "zoom_out").unwrap();

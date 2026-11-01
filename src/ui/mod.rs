@@ -11,6 +11,17 @@ use webkit6::prelude::{PolicyDecisionExt, WebViewExt};
 use text_workspace::session::ViewMode;
 use text_workspace::{graph, index, kind, markdown, places, seams, session, zoom};
 
+fn print_page(html: &str) -> String {
+    html.replace(
+        "</head>",
+        r#"<style>
+  @page { margin: 16mm; }
+  body { margin: 0; }
+</style>
+</head>"#,
+    )
+}
+
 fn media_page(uri: &str, video: bool) -> String {
     let tag = if video { "video" } else { "audio" };
     let uri = uri.replace('&', "&amp;").replace('"', "&quot;");
@@ -112,6 +123,8 @@ struct BufferEntry {
     dirty: bool,
     last_saved: String,
     acked_external: Option<String>,
+    /// Путь, который видит обработчик правок. «Сохранить как» меняет его, не создавая буфер заново.
+    identity: std::rc::Rc<std::cell::RefCell<PathBuf>>,
     // Монитор хранится здесь: если его сбросить, наблюдение за файлом прекратится.
     #[allow(dead_code)]
     monitor: Option<gio::FileMonitor>,
@@ -959,6 +972,8 @@ impl Ctx {
         }
 
         self.action(app, "save", |ctx| ctx.save_focused());
+        self.action(app, "save_as", |ctx| ctx.save_as());
+        self.action(app, "save_pdf", |ctx| ctx.save_pdf());
         self.action(app, "quick_note", |ctx| ctx.quick_note());
         self.action(app, "pin", |ctx| ctx.choose_pin());
         self.action(app, "pin_file", |ctx| {
@@ -2661,6 +2676,129 @@ impl Ctx {
         glib::timeout_add_local_once(Duration::from_millis(PREVIEW_MS), move || {
             ctx.refresh_preview_now()
         });
+    }
+
+    fn save_pdf(&self) {
+        let Some(path) = self.focused_path() else {
+            self.set_status("Нет открытого файла");
+            return;
+        };
+        if !is_markdown(&path) {
+            self.set_status("В PDF сохраняется файл Markdown");
+            return;
+        }
+        let Some(text) = self.buffer_text(&path) else {
+            self.set_status("Файл ещё не прочитан");
+            return;
+        };
+        let (pin, files) = {
+            let state = self.state.borrow();
+            (self.pin_path(), state.index.files.clone())
+        };
+        let html = print_page(&markdown::render_html(
+            &text,
+            &path,
+            pin.as_deref(),
+            &files,
+            &shell_link,
+            "twmissing:",
+        ));
+        let base = path
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let stem = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document");
+        let dialog = gtk4::FileDialog::builder()
+            .title("Сохранить PDF")
+            .modal(true)
+            .accept_label("Сохранить")
+            .initial_name(format!("{stem}.pdf"))
+            .build();
+        dialog.set_initial_folder(Some(&gio::File::for_path(&base)));
+        let ctx = self.clone();
+        let window = self.widgets.window.clone();
+        dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+            let Ok(file) = result else {
+                return;
+            };
+            let Some(dest) = file.path() else {
+                return;
+            };
+            let dest = if dest.extension().is_some() {
+                dest
+            } else {
+                dest.with_extension("pdf")
+            };
+            ctx.write_pdf(html, base, dest);
+        });
+    }
+
+    fn write_pdf(&self, html: String, base: PathBuf, dest: PathBuf) {
+        let web = webkit6::WebView::new();
+        if let Some(settings) = WebViewExt::settings(&web) {
+            settings.set_enable_javascript(false);
+            settings.set_enable_javascript_markup(false);
+            settings.set_print_backgrounds(true);
+        }
+        let host = gtk4::Window::builder()
+            .transient_for(&self.widgets.window)
+            .decorated(false)
+            .default_width(794)
+            .default_height(1123)
+            .build();
+        host.set_opacity(0.0);
+        host.set_child(Some(&web));
+        host.present();
+
+        let started = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ctx = self.clone();
+        let base_uri = gio::File::for_path(&base).uri();
+        web.connect_load_changed(move |web, event| {
+            if event != webkit6::LoadEvent::Finished || started.replace(true) {
+                return;
+            }
+            let settings = gtk4::PrintSettings::new();
+            settings.set(gtk4::PRINT_SETTINGS_OUTPUT_FILE_FORMAT, Some("pdf"));
+            settings.set(
+                gtk4::PRINT_SETTINGS_OUTPUT_URI,
+                Some(&gio::File::for_path(&dest).uri()),
+            );
+            settings.set_printer("Print to File");
+            let page = gtk4::PageSetup::new();
+            page.set_paper_size(&gtk4::PaperSize::new(Some("iso_a4")));
+            page.set_top_margin(16.0, gtk4::Unit::Mm);
+            page.set_bottom_margin(16.0, gtk4::Unit::Mm);
+            page.set_left_margin(16.0, gtk4::Unit::Mm);
+            page.set_right_margin(16.0, gtk4::Unit::Mm);
+            let operation = webkit6::PrintOperation::new(web);
+            operation.set_print_settings(&settings);
+            operation.set_page_setup(&page);
+            let host_done = host.clone();
+            let ctx_done = ctx.clone();
+            let dest_done = dest.clone();
+            let alive = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let alive_done = alive.clone();
+            operation.connect_finished(move |_| {
+                host_done.close();
+                ctx_done.set_status(&format!("PDF сохранён: {}", dest_done.display()));
+                alive_done.borrow_mut().take();
+            });
+            let host_failed = host.clone();
+            let ctx_failed = ctx.clone();
+            let alive_failed = alive.clone();
+            operation.connect_failed(move |_, error| {
+                host_failed.close();
+                ctx_failed.set_status(&format!("Не удалось сохранить PDF: {}", error.message()));
+                alive_failed.borrow_mut().take();
+            });
+            *alive.borrow_mut() = Some(operation.clone());
+            operation.print();
+        });
+        web.load_html(&html, Some(&base_uri));
     }
 
     fn refresh_preview_now(&self) {
