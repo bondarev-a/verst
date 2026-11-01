@@ -33,11 +33,26 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           asset="packaging/out/verst_${version}_amd64.deb"
           tag="v${version}"
-          notes="Готовый пакет для Ubuntu 24.04 и новее, архитектура amd64. Компилятор не нужен.
-
-          sudo apt install ./verst_${version}_amd64.deb"
+          body=$(awk -v ver="$version" '
+            $0 == "## " ver { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' release_notes.md)
+          if [ -z "$(printf "%s" "$body" | tr -d "[:space:]")" ]; then
+            echo "В release_notes.md нет раздела ## ${version}" >&2
+            exit 1
+          fi
+          notes=$(mktemp)
+          {
+            printf "%s\n" "$body"
+            echo
+            echo "Пакет для Ubuntu 24.04 и новее, архитектура amd64. Компилятор не нужен."
+            echo
+            echo "sudo apt install ./verst_${version}_amd64.deb"
+          } > "$notes"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$asset" --clobber
+            gh release edit "$tag" --notes-file "$notes"
           else
-            gh release create "$tag" "$asset" --title "Verst ${version}" --notes "$notes"
+            gh release create "$tag" "$asset" --title "Verst ${version}" --notes-file "$notes"
           fi
