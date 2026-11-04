@@ -337,6 +337,25 @@ window.verst button.mode-toggle:hover {
     opacity: 1;
     background-color: @theme_bg_color;
 }
+window.verst grid.tw-md-table {
+    margin: 4px 0 8px 0;
+    border: 1px solid alpha(@theme_fg_color, 0.18);
+    border-radius: 6px;
+    background-color: alpha(@theme_bg_color, 0.92);
+}
+window.verst entry.tw-md-cell {
+    border-radius: 0;
+    border: none;
+    border-right: 1px solid alpha(@theme_fg_color, 0.12);
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
+    background: transparent;
+    padding: 4px 8px;
+    min-height: 0;
+}
+window.verst entry.tw-md-cell-head {
+    font-weight: bold;
+    background-color: alpha(@theme_fg_color, 0.05);
+}
 window.verst paned > separator {
     background-image: none;
     background-color: alpha(@theme_fg_color, 0.14);
@@ -481,8 +500,9 @@ pub(super) fn folder_columns(directory: &gtk4::DirectoryList) -> gtk4::ColumnVie
     let view = gtk4::ColumnView::new(None::<gtk4::SingleSelection>);
     let sorted = gtk4::SortListModel::new(Some(directory.clone()), view.sorter());
     let selection = gtk4::SingleSelection::new(Some(sorted));
+    selection.set_autoselect(false);
     view.set_model(Some(&selection));
-    view.set_single_click_activate(false);
+    view.set_single_click_activate(true);
     view.set_show_row_separators(false);
     view.add_css_class("file-list");
     view.set_enable_rubberband(true);
@@ -718,6 +738,7 @@ pub(super) fn format_size(size: u64) -> String {
 pub(super) fn file_tree(
     root: &Path,
     actions: TreeActions,
+    single_click: bool,
 ) -> (gtk4::ScrolledWindow, gtk4::ListView) {
     let file = gio::File::for_path(root);
     let model = sorted_dir(&file);
@@ -737,7 +758,7 @@ pub(super) fn file_tree(
     let factory = tree_factory(actions.clone());
     let list = gtk4::ListView::new(Some(selection), Some(factory));
     list.add_css_class("file-list");
-    list.set_single_click_activate(false);
+    list.set_single_click_activate(single_click);
     list.set_vexpand(true);
     let open = actions.open.clone();
     list.connect_activate(move |list, position| {
@@ -1573,14 +1594,6 @@ pub(super) fn file_icon(path: &Path) -> gtk4::Image {
     image
 }
 
-pub(super) fn side_caption(text: &str) -> gtk4::Label {
-    let label = gtk4::Label::new(Some(text));
-    label.add_css_class("dim-label");
-    label.add_css_class("side-caption");
-    label.set_halign(gtk4::Align::Start);
-    label
-}
-
 pub(super) fn dim_row(text: &str) -> gtk4::Label {
     let label = gtk4::Label::new(Some(text));
     label.add_css_class("dim-label");
@@ -1701,7 +1714,8 @@ pub(super) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 pub(super) fn buffer_text_of(buffer: &sourceview5::Buffer) -> String {
     let start = buffer.start_iter();
     let end = buffer.end_iter();
-    buffer.text(&start, &end, false).to_string()
+    // include_hidden_chars: метки режима рендеринга не должны выпадать при сохранении.
+    buffer.text(&start, &end, true).to_string()
 }
 
 pub(super) fn about_rows(

@@ -32,7 +32,7 @@ impl Ctx {
             let mut state = self.state.borrow_mut();
             state.browsing = false;
             if notes::is_inbox(&path) || !state.loading {
-                let mode = if notes::is_inbox(&path) {
+                let mut mode = if notes::is_inbox(&path) {
                     ViewMode::Edit
                 } else if keep_mode {
                     state.session.mode_of(&path).unwrap_or(state.view_mode)
@@ -42,6 +42,9 @@ impl Ctx {
                         .mode_of(&path)
                         .unwrap_or(state.session.open_mode)
                 };
+                if mode == ViewMode::Render && !super::support::is_markdown(&path) {
+                    mode = ViewMode::Edit;
+                }
                 state.view_mode = mode;
                 state.session.view_mode = mode;
                 state.session.remember_mode(path.clone(), mode);
@@ -151,7 +154,7 @@ impl Ctx {
         let identity = Rc::new(RefCell::new(path.to_path_buf()));
         let watch_id = identity.clone();
         buffer.connect_changed(move |_| {
-            if ctx.state.borrow().loading {
+            if ctx.state.borrow().loading || ctx.state.borrow().render.writing {
                 return;
             }
             let watch = watch_id.borrow().clone();

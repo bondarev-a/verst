@@ -115,6 +115,12 @@ const COMMANDS: &[CommandSpec] = &[
         accels: &["<Control>a"],
     },
     CommandSpec {
+        id: "table_add_column",
+        title: "Добавить колонку таблицы",
+        section: "Правка",
+        accels: &[],
+    },
+    CommandSpec {
         id: "back",
         title: "Назад",
         section: "Вид",
@@ -221,11 +227,6 @@ const PANELS: &[PanelSpec] = &[
         side: PanelSide::Left,
     },
     PanelSpec {
-        id: "open",
-        title: "Открытые",
-        side: PanelSide::Left,
-    },
-    PanelSpec {
         id: "history",
         title: "История",
         side: PanelSide::Left,
@@ -265,7 +266,6 @@ pub fn panel_icon(id: &str) -> &'static str {
         "workspace" => "folder-visiting-symbolic",
         "disk" => "system-file-manager-symbolic",
         "notes" => "document-edit-symbolic",
-        "open" => "document-open-symbolic",
         "history" => "document-open-recent-symbolic",
         _ => "image-missing-symbolic",
     }
@@ -276,7 +276,6 @@ pub fn panel_hint(id: &str) -> &'static str {
         "disk" => "Проводник. Каталоги и файлы на диске",
         "workspace" => "Пространства. Запиненные каталоги",
         "notes" => "Заметки. Быстрые заметки вне пространства",
-        "open" => "Открытые. Файлы, которые открыты сейчас, и закреплённые",
         "history" => "История. Недавно открытые файлы",
         _ => "",
     }
@@ -354,24 +353,22 @@ mod tests {
         let zoom_out = commands().iter().find(|c| c.id == "zoom_out").unwrap();
         assert!(zoom_out.accels.iter().any(|a| a.contains("minus")));
         assert_eq!(panel_index("notes"), Some(2));
-        assert_eq!(panel_index("open"), Some(3));
-        assert_eq!(panel_index("history"), Some(4));
+        assert_eq!(panel_index("history"), Some(3));
         assert_eq!(panel_id(PanelSide::Left, 0), Some("disk"));
         assert_eq!(panel_id(PanelSide::Left, 1), Some("workspace"));
         assert_eq!(panel_id(PanelSide::Left, 2), Some("notes"));
-        assert_eq!(panel_id(PanelSide::Left, 3), Some("open"));
-        assert_eq!(panel_id(PanelSide::Left, 4), Some("history"));
-        assert_eq!(canonical_panel(PanelSide::Left, "", 3), "open");
+        assert_eq!(panel_id(PanelSide::Left, 3), Some("history"));
+        assert_eq!(canonical_panel(PanelSide::Left, "", 3), "history");
         assert_eq!(panel_hint("disk"), "Проводник. Каталоги и файлы на диске");
         assert!(!panel_hint("notes").is_empty());
-        assert_eq!(canonical_panel(PanelSide::Left, "open", 0), "open");
+        assert_eq!(canonical_panel(PanelSide::Left, "open", 0), "disk");
         assert_eq!(canonical_panel(PanelSide::Right, "nope", 9), "outline");
         let order = ordered_ids(
             PanelSide::Left,
             &["notes".to_string(), "notes".to_string(), "missing".to_string()],
         );
         assert_eq!(order[0], "notes");
-        assert_eq!(order.len(), 5);
+        assert_eq!(order.len(), 4);
         assert_eq!(panel_icon("disk"), "system-file-manager-symbolic");
         assert_eq!(panel_icon("notes"), "document-edit-symbolic");
         assert!(!panel_icon("workspace").is_empty());

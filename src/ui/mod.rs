@@ -11,6 +11,22 @@ use webkit6::prelude::{PolicyDecisionExt, WebViewExt};
 use text_workspace::session::ViewMode;
 use text_workspace::{graph, index, kind, markdown, places, seams, session, zoom};
 
+fn mode_dropdown_index(mode: ViewMode) -> u32 {
+    match mode {
+        ViewMode::Edit => 0,
+        ViewMode::Render => 1,
+        ViewMode::Preview => 2,
+    }
+}
+
+fn mode_from_dropdown(index: u32) -> ViewMode {
+    match index {
+        1 => ViewMode::Render,
+        2 => ViewMode::Preview,
+        _ => ViewMode::Edit,
+    }
+}
+
 fn print_page(html: &str) -> String {
     html.replace(
         "</head>",
@@ -106,8 +122,10 @@ fn note_row(list: &gtk4::ListBox, text: &str) {
 mod files;
 mod navigate;
 mod notes;
+mod render;
 mod settings;
 mod support;
+use render::RenderState;
 use support::*;
 
 pub(super) const AUTOSAVE_MS: u64 = 800;
@@ -153,6 +171,9 @@ struct State {
     nav_dir: Option<PathBuf>,
     browsing: bool,
     mode_tick: u64,
+    render: RenderState,
+    /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
+    keep_space_tree: bool,
 }
 
 #[derive(Clone)]
@@ -161,8 +182,6 @@ struct Widgets {
     pins_box: gtk4::Box,
     open_mode_dropdown: gtk4::DropDown,
     workspace_slot: gtk4::Box,
-    open_list: gtk4::ListBox,
-    pinned_list: gtk4::ListBox,
     history_list: gtk4::ListBox,
     notes_host: gtk4::Box,
     notes_tags: gtk4::FlowBox,
@@ -214,6 +233,8 @@ struct Widgets {
     editor_paned: gtk4::Paned,
     disk_list: Rc<RefCell<Option<gtk4::ListView>>>,
     workspace_list: Rc<RefCell<Option<gtk4::ListView>>>,
+    workspace_lists: Rc<RefCell<Vec<gtk4::ListView>>>,
+    workspace_folds: Rc<RefCell<Vec<gtk4::Expander>>>,
     path_label: gtk4::Label,
     nav_path: gtk4::Label,
     back_button: gtk4::Button,
@@ -324,20 +345,10 @@ impl Ctx {
         empty_buffer.set_enable_undo(true);
         let views = [make_view(&empty_buffer), make_view(&empty_buffer)];
         let workspace_slot = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        let open_list = gtk4::ListBox::new();
-        let pinned_list = gtk4::ListBox::new();
         let history_list = gtk4::ListBox::new();
-        open_list.add_css_class("navigation-sidebar");
-        pinned_list.add_css_class("navigation-sidebar");
         history_list.add_css_class("navigation-sidebar");
-        open_list.add_css_class("file-list");
-        pinned_list.add_css_class("file-list");
         history_list.add_css_class("file-list");
-        let open_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        open_page.append(&side_caption("Закреплённые"));
-        open_page.append(&pinned_list);
-        open_page.append(&side_caption("Сейчас открыты"));
-        open_page.append(&open_list);
+        workspace_slot.set_vexpand(true);
         let disk_placeholder = gtk4::Label::new(Some("Проводник"));
         let notes_new = gtk4::Button::with_label("Новая заметка");
         notes_new.add_css_class("suggested-action");
@@ -431,7 +442,6 @@ impl Ctx {
                 ("disk", disk_placeholder.upcast()),
                 ("workspace", workspace_slot.clone().upcast()),
                 ("notes", notes_page.upcast()),
-                ("open", scrolled(&open_page).upcast()),
                 ("history", scrolled(&history_list).upcast()),
             ],
         );
@@ -736,11 +746,18 @@ impl Ctx {
         let pin_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         pin_box.add_css_class("pinbar");
         let pins_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        pins_box.set_hexpand(true);
-        let open_mode_dropdown = gtk4::DropDown::from_strings(&["Редактирование", "Просмотр"]);
-        if session.open_mode == ViewMode::Preview {
-            open_mode_dropdown.set_selected(1);
-        }
+        pins_box.set_halign(gtk4::Align::Start);
+        let open_caption = gtk4::Label::new(Some("Открытые файлы"));
+        open_caption.add_css_class("dim-label");
+        open_caption.set_margin_end(4);
+        let pins_scroll = gtk4::ScrolledWindow::new();
+        pins_scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Never);
+        pins_scroll.set_hexpand(true);
+        pins_scroll.set_propagate_natural_height(true);
+        pins_scroll.set_child(Some(&pins_box));
+        let open_mode_dropdown =
+            gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
+        open_mode_dropdown.set_selected(mode_dropdown_index(session.open_mode));
         open_mode_dropdown.set_tooltip_text(Some(
             "Как открывать следующий файл. Кнопка в углу переключает вид текущего.",
         ));
@@ -751,7 +768,8 @@ impl Ctx {
         open_mode_box.set_valign(gtk4::Align::Center);
         open_mode_box.append(&open_mode_label);
         open_mode_box.append(&open_mode_dropdown);
-        pin_box.append(&pins_box);
+        pin_box.append(&open_caption);
+        pin_box.append(&pins_scroll);
         pin_box.append(&open_mode_box);
         let path_label = gtk4::Label::new(None);
         path_label.set_halign(gtk4::Align::Start);
@@ -834,8 +852,6 @@ impl Ctx {
             pins_box,
             open_mode_dropdown,
             workspace_slot,
-            open_list,
-            pinned_list,
             history_list,
             notes_host,
             notes_tags,
@@ -887,6 +903,8 @@ impl Ctx {
             editor_paned: editors,
             disk_list: Rc::new(RefCell::new(None)),
             workspace_list: Rc::new(RefCell::new(None)),
+            workspace_lists: Rc::new(RefCell::new(Vec::new())),
+            workspace_folds: Rc::new(RefCell::new(Vec::new())),
             path_label,
             nav_path,
             back_button,
@@ -935,6 +953,8 @@ impl Ctx {
                 nav_dir: None,
                 browsing: false,
                 mode_tick: 0,
+                render: RenderState::default(),
+                keep_space_tree: false,
             })),
             widgets,
         };
@@ -1002,6 +1022,7 @@ impl Ctx {
             ctx.focused_view().emit_paste_clipboard()
         });
         self.action(app, "select_all", |ctx| ctx.edit_select_all());
+        self.action(app, "table_add_column", |ctx| ctx.add_table_column());
         self.action(app, "back", |ctx| ctx.shift_history(true));
         self.action(app, "forward", |ctx| ctx.shift_history(false));
         self.action(app, "show_history", |ctx| ctx.show_panel("history"));
@@ -1112,6 +1133,7 @@ impl Ctx {
 
     fn bind(&self) {
         self.install_external_drop();
+        self.install_render_clicks();
         let ctx = self.clone();
         self.widgets.window.connect_close_request(move |_| {
             ctx.save_session();
@@ -1128,6 +1150,7 @@ impl Ctx {
                 }
                 state.session.left_page = page_index;
                 let notes = id == "notes";
+                let workspace = id == "workspace";
                 drop(state);
                 ctx.state.borrow_mut().nav_dir = None;
                 ctx.save_session();
@@ -1135,6 +1158,9 @@ impl Ctx {
                 ctx.refresh_nav_path();
                 if notes {
                     ctx.refresh_notes();
+                }
+                if workspace && !ctx.state.borrow().keep_space_tree {
+                    ctx.show_space_list();
                 }
             });
         let ctx = self.clone();
@@ -1224,6 +1250,9 @@ impl Ctx {
                 button.add_css_class("activity-on");
                 ctx.state.borrow_mut().session.left_panel = id.clone();
                 ctx.show_panel(&id);
+                if id == "workspace" {
+                    ctx.show_space_list();
+                }
                 if !ctx.state.borrow().session.nav_open {
                     ctx.expand_nav();
                 }
@@ -1239,7 +1268,13 @@ impl Ctx {
             ctx.set_nav_pinned(button.is_active());
         });
         let ctx = self.clone();
-        self.widgets.nav_fold.connect_clicked(move |_| ctx.fold_nav());
+        self.widgets.nav_fold.connect_clicked(move |_| {
+            if ctx.state.borrow().session.nav_open {
+                ctx.fold_nav();
+            } else {
+                ctx.expand_nav();
+            }
+        });
         let ctx = self.clone();
         self.widgets.nav_expand.connect_clicked(move |_| ctx.expand_nav());
         let ctx = self.clone();
@@ -1341,43 +1376,6 @@ impl Ctx {
         });
         self.widgets.content_stack.add_controller(click);
 
-        let ctx = self.clone();
-        self.widgets.open_list.connect_row_activated(move |_, row| {
-            let index = row.index();
-            if index < 0 {
-                return;
-            }
-            let path = ctx
-                .state
-                .borrow()
-                .session
-                .open_files
-                .get(index as usize)
-                .cloned();
-            if let Some(path) = path {
-                ctx.go(path, None);
-            }
-        });
-
-        let ctx = self.clone();
-        self.widgets
-            .pinned_list
-            .connect_row_activated(move |_, row| {
-                let index = row.index();
-                if index < 0 {
-                    return;
-                }
-                let path = ctx
-                    .state
-                    .borrow()
-                    .session
-                    .pinned_files
-                    .get(index as usize)
-                    .cloned();
-                if let Some(path) = path {
-                    ctx.go(path, None);
-                }
-            });
 
         let ctx = self.clone();
         self.widgets
@@ -1452,17 +1450,12 @@ impl Ctx {
         self.widgets
             .open_mode_dropdown
             .connect_selected_notify(move |dropdown| {
-                let mode = if dropdown.selected() == 1 {
-                    ViewMode::Preview
-                } else {
-                    ViewMode::Edit
-                };
-                ctx.set_open_mode(mode);
+                ctx.set_open_mode(mode_from_dropdown(dropdown.selected()));
             });
         let ctx = self.clone();
-        self.widgets
-            .mode_button
-            .connect_clicked(move |_| ctx.toggle_view_mode());
+        self.widgets.mode_button.connect_clicked(move |button| {
+            ctx.show_mode_menu(button);
+        });
         let ctx = self.clone();
         self.widgets.menubar.set_visible(false);
         self.widgets.catalog_button.connect_clicked(move |button| {
@@ -1612,7 +1605,7 @@ impl Ctx {
     }
 
     fn mount_disk(&self) {
-        let (scroll, list) = file_tree(Path::new("/"), self.tree_actions());
+        let (scroll, list) = file_tree(Path::new("/"), self.tree_actions(), false);
         self.watch_tree_directory(&list);
         *self.widgets.disk_list.borrow_mut() = Some(list);
         let index = notebook_index_of(&self.widgets.left_notebook, "disk").unwrap_or(0);
@@ -1620,9 +1613,17 @@ impl Ctx {
     }
 
     fn mount_workspace(&self) {
+        self.show_space_list();
+    }
+
+    fn show_space_list(&self) {
         clear_box(&self.widgets.workspace_slot);
-        let Some(pin) = self.pin_path() else {
-            *self.widgets.workspace_list.borrow_mut() = None;
+        self.widgets.workspace_folds.borrow_mut().clear();
+        self.widgets.workspace_lists.borrow_mut().clear();
+        *self.widgets.workspace_list.borrow_mut() = None;
+        let pins = self.state.borrow().session.pins.clone();
+        let active = self.state.borrow().session.active_pin;
+        if pins.is_empty() {
             self.refresh_nav_path();
             let label = gtk4::Label::new(Some(
                 "Запините каталог из меню файла или правой кнопкой в дереве",
@@ -1633,13 +1634,128 @@ impl Ctx {
             label.set_margin_end(8);
             self.widgets.workspace_slot.append(&label);
             return;
+        }
+        let list = gtk4::ListBox::new();
+        list.add_css_class("navigation-sidebar");
+        list.add_css_class("file-list");
+        list.set_vexpand(true);
+        let skip_activate = std::rc::Rc::new(std::cell::Cell::new(false));
+        for (index, pin) in pins.iter().enumerate() {
+            let name = pin
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("каталог");
+            let title = gtk4::Label::new(Some(name));
+            title.set_halign(gtk4::Align::Start);
+            title.set_hexpand(true);
+            title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            if Some(index) == active {
+                title.add_css_class("heading");
+            }
+            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            row.add_css_class("file-row");
+            row.set_can_target(false);
+            row.set_tooltip_text(Some(&pin.display().to_string()));
+            let icon = gtk4::Image::from_icon_name("folder-symbolic");
+            icon.set_pixel_size(16);
+            icon.set_can_target(false);
+            title.set_can_target(false);
+            let close = gtk4::Button::from_icon_name("window-close-symbolic");
+            close.add_css_class("flat");
+            close.add_css_class("row-action");
+            close.set_tooltip_text(Some("Убрать пространство"));
+            let ctx = self.clone();
+            let skip = skip_activate.clone();
+            close.connect_clicked(move |_| {
+                skip.set(true);
+                ctx.remove_pin(index);
+            });
+            row.append(&icon);
+            row.append(&title);
+            row.append(&close);
+            list.append(&row);
+        }
+        let ctx = self.clone();
+        list.connect_row_activated(move |_, row| {
+            if skip_activate.replace(false) {
+                return;
+            }
+            let index = row.index();
+            if index >= 0 {
+                ctx.activate_pin(index as usize);
+            }
+        });
+        self.widgets.workspace_slot.append(&scrolled(&list));
+        self.refresh_nav_path();
+    }
+
+    fn show_space_tree(&self) {
+        clear_box(&self.widgets.workspace_slot);
+        self.widgets.workspace_folds.borrow_mut().clear();
+        self.widgets.workspace_lists.borrow_mut().clear();
+        let Some(pin) = self.pin_path() else {
+            self.show_space_list();
+            return;
         };
-        let (scroll, list) = file_tree(&pin, self.tree_actions());
+        let back = gtk4::Button::with_label("Все пространства");
+        back.add_css_class("flat");
+        back.set_halign(gtk4::Align::Start);
+        back.set_margin_start(6);
+        back.set_margin_top(4);
+        back.set_margin_bottom(4);
+        let ctx = self.clone();
+        back.connect_clicked(move |_| ctx.show_space_list());
+        let (scroll, list) = file_tree(&pin, self.workspace_actions(&pin), true);
         self.watch_tree_directory(&list);
-        *self.widgets.workspace_list.borrow_mut() = Some(list);
         scroll.set_vexpand(true);
+        *self.widgets.workspace_list.borrow_mut() = Some(list);
+        self.widgets.workspace_slot.append(&back);
         self.widgets.workspace_slot.append(&scroll);
         self.refresh_nav_path();
+    }
+
+    fn workspace_actions(&self, pin: &Path) -> TreeActions {
+        let mut actions = self.tree_actions();
+        let ctx = self.clone();
+        let pin = pin.to_path_buf();
+        let open = actions.open.clone();
+        actions.open = Rc::new(move |path| {
+            ctx.use_space(&pin);
+            open(path);
+        });
+        actions
+    }
+
+    fn use_space(&self, pin: &Path) {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let Some(index) = state.session.pins.iter().position(|item| item == pin) else {
+                return;
+            };
+            if state.session.active_pin == Some(index) {
+                false
+            } else {
+                state.session.active_pin = Some(index);
+                true
+            }
+        };
+        if changed {
+            if let Some(index) = self.state.borrow().session.active_pin {
+                if let Some(list) = self.widgets.workspace_lists.borrow().get(index).cloned() {
+                    *self.widgets.workspace_list.borrow_mut() = Some(list);
+                }
+            }
+            self.rebuild_pins();
+            self.reindex();
+            self.save_session();
+        }
+    }
+
+    fn open_space_tree(&self) {
+        self.state.borrow_mut().keep_space_tree = true;
+        self.show_space_tree();
+        self.show_panel("workspace");
+        self.state.borrow_mut().keep_space_tree = false;
     }
 
     fn reveal_focused(&self, place: TreePlace) {
@@ -1660,6 +1776,7 @@ impl Ctx {
                 reveal_in_tree(list, PathBuf::from("/"), path, self.tree_notice());
             }
             TreePlace::Workspace => {
+                self.open_space_tree();
                 let Some(pin) = self.pin_path() else {
                     self.set_status("Сначала запините пространство");
                     return;
@@ -1943,9 +2060,8 @@ impl Ctx {
             }
         }
         self.rebuild_pins();
-        self.mount_workspace();
         self.reindex();
-        self.show_panel("workspace");
+        self.open_space_tree();
         self.save_session();
     }
 
@@ -1966,9 +2082,8 @@ impl Ctx {
             })
             .unwrap_or_else(|| "каталог".to_string());
         self.rebuild_pins();
-        self.mount_workspace();
         self.reindex();
-        self.show_panel("workspace");
+        self.open_space_tree();
         self.save_session();
         self.set_status(&format!(
             "Пространство «{name}»: дерево, поиск, входящие и граф"
@@ -2051,51 +2166,52 @@ impl Ctx {
             };
         }
         self.rebuild_pins();
-        self.mount_workspace();
+        self.show_space_list();
         self.reindex();
         self.save_session();
     }
 
     fn rebuild_pins(&self) {
         clear_box(&self.widgets.pins_box);
-        let pins = self.state.borrow().session.pins.clone();
-        let active = self.state.borrow().session.active_pin;
-        let caption = gtk4::Label::new(Some("Пространства"));
-        caption.add_css_class("dim-label");
-        caption.set_margin_end(4);
-        self.widgets.pins_box.append(&caption);
-        if pins.is_empty() {
-            let hint = gtk4::Label::new(Some("Запините каталог, чтобы открыть пространство"));
+        let files = self.state.borrow().session.open_files.clone();
+        let focused = self.focused_path();
+        if files.is_empty() {
+            let hint = gtk4::Label::new(Some("Нет открытых файлов"));
             hint.add_css_class("dim-label");
             hint.set_margin_start(4);
             self.widgets.pins_box.append(&hint);
+            return;
         }
-        for (index, path) in pins.iter().enumerate() {
-            let name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("каталог");
-            let button = gtk4::Button::with_label(name);
+        for path in files.iter().rev() {
+            let dirty = self
+                .state
+                .borrow()
+                .buffers
+                .get(path)
+                .is_some_and(|entry| entry.dirty);
+            let name = file_label(path);
+            let title = if dirty { format!("● {name}") } else { name };
+            let label = gtk4::Label::new(Some(&title));
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            label.set_max_width_chars(28);
+            label.set_can_target(false);
+            let button = gtk4::Button::new();
+            button.set_child(Some(&label));
             button.add_css_class("pin-name");
-            let number = if index < 9 {
-                format!("\nCtrl+{}", index + 1)
-            } else {
-                String::new()
-            };
-            button.set_tooltip_text(Some(&format!(
-                "Открыть пространство «{name}»{number}\n{}",
-                path.display()
-            )));
-            if Some(index) == active {
+            button.set_tooltip_text(Some(&path.display().to_string()));
+            if focused.as_ref() == Some(path) {
                 button.add_css_class("suggested-action");
             }
             let ctx = self.clone();
-            button.connect_clicked(move |_| ctx.activate_pin(index));
+            let open_path = path.clone();
+            button.connect_clicked(move |_| ctx.go(open_path.clone(), None));
             let close = gtk4::Button::from_icon_name("window-close-symbolic");
             close.add_css_class("flat");
             close.add_css_class("pin-close");
+            close.set_tooltip_text(Some("Закрыть файл"));
             let ctx = self.clone();
-            close.connect_clicked(move |_| ctx.remove_pin(index));
+            let close_path = path.clone();
+            close.connect_clicked(move |_| ctx.close_file(&close_path));
             let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             group.add_css_class("linked");
             group.append(&button);
@@ -2195,9 +2311,11 @@ impl Ctx {
             self.set_status("Этот файл только для просмотра");
             return;
         }
-        let next = match self.state.borrow().view_mode {
-            ViewMode::Edit => ViewMode::Preview,
-            ViewMode::Preview => ViewMode::Edit,
+        let markdown = self.focused_path().is_some_and(|path| is_markdown(&path));
+        let next = match (self.state.borrow().view_mode, markdown) {
+            (ViewMode::Edit, true) => ViewMode::Render,
+            (ViewMode::Render, _) => ViewMode::Preview,
+            (ViewMode::Preview, _) | (ViewMode::Edit, false) => ViewMode::Edit,
         };
         self.change_view_mode(next);
     }
@@ -2396,12 +2514,19 @@ impl Ctx {
             return;
         }
         let mode = self.state.borrow().view_mode;
+        let markdown = path.as_ref().is_some_and(|path| is_markdown(path));
+        let mode = if mode == ViewMode::Render && !markdown {
+            self.state.borrow_mut().view_mode = ViewMode::Edit;
+            ViewMode::Edit
+        } else {
+            mode
+        };
         let show_preview = mode == ViewMode::Preview
             && path.as_ref().is_some_and(|path| {
                 is_markdown(path)
                     || matches!(kind::shown(path), kind::Shown::Html | kind::Shown::Svg)
             });
-        let editable = mode == ViewMode::Edit;
+        let editable = mode == ViewMode::Edit || mode == ViewMode::Render;
         for view in &self.widgets.views {
             view.set_editable(editable);
         }
@@ -2410,19 +2535,41 @@ impl Ctx {
         } else {
             self.widgets.content_stack.set_visible_child_name("edit");
         }
-        if mode == ViewMode::Preview {
-            self.widgets
-                .mode_button
-                .set_icon_name("document-edit-symbolic");
-            self.widgets
-                .mode_button
-                .set_tooltip_text(Some("Редактировать"));
-        } else {
-            self.widgets
-                .mode_button
-                .set_icon_name("view-reveal-symbolic");
-            self.widgets.mode_button.set_tooltip_text(Some("Просмотр"));
+        match mode {
+            ViewMode::Preview => {
+                self.widgets
+                    .mode_button
+                    .set_icon_name("document-edit-symbolic");
+                self.widgets
+                    .mode_button
+                    .set_tooltip_text(Some("Редактировать"));
+            }
+            ViewMode::Render => {
+                self.widgets
+                    .mode_button
+                    .set_icon_name("view-reveal-symbolic");
+                self.widgets
+                    .mode_button
+                    .set_tooltip_text(Some("Просмотр"));
+            }
+            ViewMode::Edit if markdown => {
+                self.widgets
+                    .mode_button
+                    .set_icon_name("view-paged-symbolic");
+                self.widgets
+                    .mode_button
+                    .set_tooltip_text(Some("Рендеринг"));
+            }
+            ViewMode::Edit => {
+                self.widgets
+                    .mode_button
+                    .set_icon_name("view-reveal-symbolic");
+                self.widgets
+                    .mode_button
+                    .set_tooltip_text(Some("Просмотр"));
+            }
         }
+        self.apply_render_mode_chrome();
     }
 
     fn show_catalog_menu(&self, anchor: &gtk4::Button) {
@@ -2463,40 +2610,8 @@ impl Ctx {
     }
 
     fn refresh_open_list(&self) {
-        clear_list(&self.widgets.open_list);
-        let files = self.state.borrow().session.open_files.clone();
-        let focused = self.focused_path();
-        if files.is_empty() {
-            self.widgets
-                .open_list
-                .append(&dim_row("Нет открытых файлов"));
-        }
-        for path in files {
-            let emphasized = focused.as_ref() == Some(&path);
-            self.widgets
-                .open_list
-                .append(&self.file_row(&path, emphasized, true));
-        }
-        self.refresh_pinned_list();
+        self.rebuild_pins();
         self.refresh_history();
-    }
-
-    fn refresh_pinned_list(&self) {
-        clear_list(&self.widgets.pinned_list);
-        let files = self.state.borrow().session.pinned_files.clone();
-        if files.is_empty() {
-            self.widgets
-                .pinned_list
-                .append(&dim_row("Нет закреплённых файлов"));
-            return;
-        }
-        let focused = self.focused_path();
-        for path in files {
-            let emphasized = focused.as_ref() == Some(&path);
-            self.widgets
-                .pinned_list
-                .append(&self.file_row(&path, emphasized, false));
-        }
     }
 
     fn refresh_history(&self) {
@@ -2534,8 +2649,8 @@ impl Ctx {
         let label = gtk4::Label::new(Some(&title));
         label.set_halign(gtk4::Align::Start);
         label.set_hexpand(true);
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-        label.set_tooltip_text(Some(&path.display().to_string()));
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        label.set_can_target(false);
         if emphasized {
             label.add_css_class("heading");
         }
@@ -2553,7 +2668,10 @@ impl Ctx {
         pin.connect_clicked(move |_| ctx.toggle_pin_file(&watch));
         let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         row.add_css_class("file-row");
-        row.append(&file_icon(path));
+        row.set_tooltip_text(Some(&path.display().to_string()));
+        let icon = file_icon(path);
+        icon.set_can_target(false);
+        row.append(&icon);
         row.append(&label);
         row.append(&pin);
         if closable {
@@ -2676,6 +2794,7 @@ impl Ctx {
         glib::timeout_add_local_once(Duration::from_millis(PREVIEW_MS), move || {
             ctx.refresh_preview_now()
         });
+        self.schedule_render();
     }
 
     fn save_pdf(&self) {
@@ -3708,6 +3827,17 @@ impl Ctx {
         self.widgets.nav_pin.set_active(pinned);
         self.widgets.nav_rail_pin.set_active(pinned);
         self.widgets.nav_fold.set_sensitive(true);
+        if open {
+            self.widgets.nav_fold.set_icon_name("pan-start-symbolic");
+            self.widgets
+                .nav_fold
+                .set_tooltip_text(Some("Свернуть навигацию"));
+        } else {
+            self.widgets.nav_fold.set_icon_name("pan-end-symbolic");
+            self.widgets
+                .nav_fold
+                .set_tooltip_text(Some("Развернуть навигацию"));
+        }
         self.widgets.left_notebook.set_visible(open);
         self.widgets.nav_rail.set_visible(false);
         self.widgets.activity_bar.set_visible(true);

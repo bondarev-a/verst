@@ -82,23 +82,15 @@ impl Ctx {
         });
         box_.append(&labeled("Тема исходника", &theme_dropdown));
 
-        let open_mode = gtk4::DropDown::from_strings(&["Редактирование", "Просмотр"]);
-        open_mode.set_selected(if session.open_mode == ViewMode::Preview {
-            1
-        } else {
-            0
-        });
+        let open_mode =
+            gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
+        open_mode.set_selected(super::mode_dropdown_index(session.open_mode));
         open_mode.set_tooltip_text(Some(
             "Как открывать следующий файл. Кнопка в углу переключает вид текущего.",
         ));
         let ctx = self.clone();
         open_mode.connect_selected_notify(move |dropdown| {
-            let mode = if dropdown.selected() == 1 {
-                ViewMode::Preview
-            } else {
-                ViewMode::Edit
-            };
-            ctx.set_open_mode(mode);
+            ctx.set_open_mode(super::mode_from_dropdown(dropdown.selected()));
         });
         *self.widgets.open_mode_settings.borrow_mut() = Some(open_mode.clone());
         box_.append(&labeled("Открывать", &open_mode));
@@ -186,7 +178,7 @@ impl Ctx {
     }
 
     fn sync_open_dropdowns(&self, mode: ViewMode) {
-        let index = if mode == ViewMode::Preview { 1 } else { 0 };
+        let index = super::mode_dropdown_index(mode);
         if self.widgets.open_mode_dropdown.selected() != index {
             self.widgets.open_mode_dropdown.set_selected(index);
         }

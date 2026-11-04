@@ -24,6 +24,8 @@ pub enum ViewMode {
     #[default]
     Edit,
     Preview,
+    /// Markdown на GtkSourceView с метками и сеткой таблиц.
+    Render,
 }
 
 impl ViewMode {
@@ -31,14 +33,15 @@ impl ViewMode {
         match self {
             Self::Edit => "edit",
             Self::Preview => "preview",
+            Self::Render => "render",
         }
     }
 
     pub fn parse(value: &str) -> Self {
-        if value == "preview" {
-            Self::Preview
-        } else {
-            Self::Edit
+        match value {
+            "preview" => Self::Preview,
+            "render" => Self::Render,
+            _ => Self::Edit,
         }
     }
 }
@@ -88,7 +91,7 @@ pub struct Session {
     pub left_page: u32,
     #[serde(default)]
     pub right_page: u32,
-    /// Устойчивое имя левой вкладки: disk, workspace, open, history.
+    /// Устойчивое имя левой вкладки: disk, workspace, notes, history.
     #[serde(default)]
     pub left_panel: String,
     /// Устойчивое имя правой вкладки: outline, search, backlinks (в меню «Ссылки»), graph.
@@ -295,6 +298,9 @@ impl Session {
         if self.theme.is_empty() {
             self.theme = default_theme();
         }
+        if self.left_panel == "open" {
+            self.left_panel = "workspace".to_string();
+        }
         self.left_panel = seams::canonical_panel(PanelSide::Left, &self.left_panel, self.left_page);
         self.right_panel =
             seams::canonical_panel(PanelSide::Right, &self.right_panel, self.right_page);
@@ -438,7 +444,7 @@ mod tests {
         assert!(session.info_open && session.info_pinned);
         assert_eq!(
             session.left_order,
-            ["disk", "workspace", "notes", "open", "history"]
+            ["disk", "workspace", "notes", "history"]
         );
         assert_eq!(session.nav_width, 280);
         let session = Session::from_json(r#"{"word_wrap":true}"#).unwrap();
@@ -447,14 +453,14 @@ mod tests {
 
     #[test]
     fn history_page_is_kept() {
-        let session = Session::from_json(r#"{"left_page":4}"#).unwrap();
+        let session = Session::from_json(r#"{"left_page":3}"#).unwrap();
         assert_eq!(session.left_panel, "history");
-        assert_eq!(session.left_page, 4);
+        assert_eq!(session.left_page, 3);
         let session = Session::from_json(r#"{"left_page":9}"#).unwrap();
         assert_eq!(session.left_panel, "disk");
         let session = Session::from_json(r#"{"left_panel":"open","left_page":0}"#).unwrap();
-        assert_eq!(session.left_panel, "open");
-        assert_eq!(session.left_page, 3);
+        assert_eq!(session.left_panel, "workspace");
+        assert_eq!(session.left_page, 1);
     }
 
     #[test]
@@ -465,6 +471,20 @@ mod tests {
         .unwrap();
         assert_eq!(session.view_mode, ViewMode::Edit);
         assert_eq!(session.open_mode, ViewMode::Edit);
+    }
+
+    #[test]
+    fn render_mode_roundtrips_in_session() {
+        assert_eq!(ViewMode::parse("render"), ViewMode::Render);
+        assert_eq!(ViewMode::Render.as_str(), "render");
+        let session = Session::from_json(r#"{"view_mode":"render","open_mode":"render"}"#).unwrap();
+        assert_eq!(session.view_mode, ViewMode::Render);
+        assert_eq!(session.open_mode, ViewMode::Render);
+        let mut session = Session::default();
+        session.remember_mode(PathBuf::from("/a.md"), ViewMode::Render);
+        assert_eq!(session.mode_of(Path::new("/a.md")), Some(ViewMode::Render));
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("render"));
     }
 
     #[test]
