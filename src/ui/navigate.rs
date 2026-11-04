@@ -82,10 +82,11 @@ impl Ctx {
             self.state.borrow_mut().nav.leave(here);
         }
         if !same_file {
+            self.state.borrow_mut().pending_jump = line;
             self.open_file(path, keep_preview);
-        }
-        if let Some(line) = line {
+        } else if let Some(line) = line {
             self.jump_to_line(line as usize);
+            self.stash_pane_caret(self.focused_index());
         }
         self.update_nav_buttons();
     }
@@ -266,26 +267,129 @@ impl Ctx {
         }
     }
 
+    pub(super) fn stash_pane_caret(&self, pane: usize) {
+        if self.state.borrow().loading {
+            return;
+        }
+        let Some(path) = self
+            .state
+            .borrow()
+            .session
+            .pane_paths
+            .get(pane)
+            .cloned()
+            .flatten()
+        else {
+            return;
+        };
+        if !self.view_shows_path(pane, &path) {
+            return;
+        }
+        let buffer = self.widgets.views[pane].buffer();
+        let offset = buffer.cursor_position();
+        let iter = if offset < 0 {
+            buffer.start_iter()
+        } else {
+            buffer.iter_at_offset(offset)
+        };
+        let place = session::CaretPlace {
+            path,
+            line: iter.line().max(0) as u32,
+            column: iter.line_offset().max(0) as u32,
+        };
+        session::remember_caret(&mut self.state.borrow_mut().session.carets, place);
+    }
+
+    fn view_shows_path(&self, pane: usize, path: &Path) -> bool {
+        let Some(entry) = self.state.borrow().buffers.get(path).map(|entry| entry.buffer.clone())
+        else {
+            return false;
+        };
+        self.widgets.views[pane]
+            .buffer()
+            .downcast::<sourceview5::Buffer>()
+            .ok()
+            .is_some_and(|buffer| buffer == entry)
+    }
+
+    pub(super) fn reveal_pane_caret(&self, pane: usize, path: &Path) {
+        let saved = self
+            .state
+            .borrow()
+            .session
+            .carets
+            .iter()
+            .find(|place| place.path == path)
+            .map(|place| (place.line, place.column));
+        if let Some((line, column)) = saved {
+            self.place_cursor(pane, line, column, true);
+            return;
+        }
+        let view = &self.widgets.views[pane];
+        let buffer = view.buffer();
+        let offset = buffer.cursor_position();
+        let iter = if offset < 0 {
+            buffer.start_iter()
+        } else {
+            buffer.iter_at_offset(offset)
+        };
+        self.place_cursor(
+            pane,
+            iter.line().max(0) as u32,
+            iter.line_offset().max(0) as u32,
+            true,
+        );
+    }
+
+    pub(super) fn settle_open_place(&self, pane: usize, path: &Path, clear_jump: bool) {
+        if self.state.borrow().loading {
+            return;
+        }
+        let jump = if clear_jump {
+            self.state.borrow_mut().pending_jump.take()
+        } else {
+            self.state.borrow().pending_jump
+        };
+        if let Some(line) = jump {
+            self.jump_to_line(line as usize);
+            self.stash_pane_caret(pane);
+            return;
+        }
+        self.reveal_pane_caret(pane, path);
+    }
+
     pub(super) fn capture_carets(&self, state: &mut State) {
-        let mut carets = Vec::new();
         for pane in 0..2 {
             let Some(path) = state.session.pane_paths.get(pane).cloned().flatten() else {
                 continue;
             };
+            let Some(entry) = state.buffers.get(&path).map(|entry| entry.buffer.clone()) else {
+                continue;
+            };
             let buffer = self.widgets.views[pane].buffer();
+            let same = buffer
+                .clone()
+                .downcast::<sourceview5::Buffer>()
+                .ok()
+                .is_some_and(|showing| showing == entry);
+            if !same {
+                continue;
+            }
             let offset = buffer.cursor_position();
             let iter = if offset < 0 {
                 buffer.start_iter()
             } else {
                 buffer.iter_at_offset(offset)
             };
-            carets.push(session::CaretPlace {
-                path,
-                line: iter.line().max(0) as u32,
-                column: iter.line_offset().max(0) as u32,
-            });
+            session::remember_caret(
+                &mut state.session.carets,
+                session::CaretPlace {
+                    path,
+                    line: iter.line().max(0) as u32,
+                    column: iter.line_offset().max(0) as u32,
+                },
+            );
         }
-        state.session.carets = carets;
     }
 
     pub(super) fn restore_carets(&self, session: &session::Session) {

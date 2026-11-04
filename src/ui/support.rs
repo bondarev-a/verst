@@ -350,7 +350,7 @@ window.verst entry.tw-md-cell {
     border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
     background: transparent;
     padding: 4px 8px;
-    min-height: 0;
+    min-height: 26px;
 }
 window.verst entry.tw-md-cell-head {
     font-weight: bold;

@@ -28,6 +28,7 @@ impl Ctx {
             }
         }
         let pane = self.focused_index();
+        self.stash_pane_caret(pane);
         {
             let mut state = self.state.borrow_mut();
             state.browsing = false;
@@ -49,8 +50,7 @@ impl Ctx {
                 state.session.view_mode = mode;
                 state.session.remember_mode(path.clone(), mode);
             }
-            state.session.open_files.retain(|open| open != &path);
-            state.session.open_files.push(path.clone());
+            text_workspace::session::remember_open(&mut state.session.open_files, path.clone());
             if state.session.pane_paths.len() < 2 {
                 state.session.pane_paths.resize(2, None);
             }
@@ -73,6 +73,23 @@ impl Ctx {
         }
         self.refresh_open_list();
         self.follow_focus();
+        self.settle_open_place(pane, &path, false);
+        let ctx = self.clone();
+        let watch = path.clone();
+        glib::idle_add_local_once(move || {
+            let current = ctx
+                .state
+                .borrow()
+                .session
+                .pane_paths
+                .get(pane)
+                .cloned()
+                .flatten();
+            if current.as_deref() != Some(watch.as_path()) {
+                return;
+            }
+            ctx.settle_open_place(pane, &watch, true);
+        });
         if !self.state.borrow().loading {
             self.enforce_open_limit();
         }
@@ -112,6 +129,7 @@ impl Ctx {
         {
             let mut state = self.state.borrow_mut();
             state.session.open_files.retain(|open| open != path);
+            state.session.carets.retain(|place| place.path != path);
             for pane in &mut state.session.pane_paths {
                 if pane.as_ref().is_some_and(|open| open == path) {
                     *pane = None;
@@ -307,11 +325,27 @@ impl Ctx {
         let mode = self.state.borrow().view_mode;
         {
             let mut state = self.state.borrow_mut();
-            state
-                .session
-                .open_files
-                .retain(|open| open != source && open != dest);
-            state.session.open_files.push(dest.to_path_buf());
+            let dest_buf = dest.to_path_buf();
+            let files = &mut state.session.open_files;
+            if let Some(index) = files.iter().position(|open| open == source) {
+                files[index] = dest_buf.clone();
+            }
+            let mut kept_dest = false;
+            files.retain(|open| {
+                if open == source {
+                    return false;
+                }
+                if open == &dest_buf {
+                    if kept_dest {
+                        return false;
+                    }
+                    kept_dest = true;
+                }
+                true
+            });
+            if !kept_dest {
+                files.push(dest_buf);
+            }
             for pane in &mut state.session.pane_paths {
                 if pane.as_deref() == Some(source) || pane.as_deref() == Some(dest) {
                     *pane = Some(dest.to_path_buf());

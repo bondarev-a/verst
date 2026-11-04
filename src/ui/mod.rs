@@ -172,6 +172,8 @@ struct State {
     browsing: bool,
     mode_tick: u64,
     render: RenderState,
+    /// Строка, на которую надо встать после открытия файла по ссылке.
+    pending_jump: Option<u32>,
     /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
     keep_space_tree: bool,
 }
@@ -701,7 +703,8 @@ impl Ctx {
         mode_button.set_margin_top(8);
         mode_button.set_margin_end(8);
         mode_button.set_can_focus(false);
-        mode_button.set_tooltip_text(Some("Просмотр"));
+        mode_button.set_tooltip_text(Some("Вернуться к файлу"));
+        mode_button.set_visible(false);
         if let Some(image) = mode_button
             .child()
             .and_then(|child| child.downcast::<gtk4::Image>().ok())
@@ -759,9 +762,9 @@ impl Ctx {
             gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
         open_mode_dropdown.set_selected(mode_dropdown_index(session.open_mode));
         open_mode_dropdown.set_tooltip_text(Some(
-            "Как открывать следующий файл. Кнопка в углу переключает вид текущего.",
+            "Вид текущего файла: редактирование, рендеринг или просмотр",
         ));
-        let open_mode_label = gtk4::Label::new(Some("Открывать"));
+        let open_mode_label = gtk4::Label::new(Some("Вид"));
         open_mode_label.add_css_class("dim-label");
         let open_mode_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         open_mode_box.set_halign(gtk4::Align::End);
@@ -954,6 +957,7 @@ impl Ctx {
                 browsing: false,
                 mode_tick: 0,
                 render: RenderState::default(),
+                pending_jump: None,
                 keep_space_tree: false,
             })),
             widgets,
@@ -1450,11 +1454,29 @@ impl Ctx {
         self.widgets
             .open_mode_dropdown
             .connect_selected_notify(move |dropdown| {
-                ctx.set_open_mode(mode_from_dropdown(dropdown.selected()));
+                if ctx.state.borrow().loading {
+                    return;
+                }
+                let mut mode = mode_from_dropdown(dropdown.selected());
+                let markdown = ctx
+                    .focused_path()
+                    .is_some_and(|path| is_markdown(&path));
+                if mode == ViewMode::Render && !markdown {
+                    ctx.set_status("Рендеринг только для Markdown");
+                    mode = ViewMode::Edit;
+                    let index = mode_dropdown_index(mode);
+                    if dropdown.selected() != index {
+                        dropdown.set_selected(index);
+                        return;
+                    }
+                }
+                ctx.change_view_mode(mode);
             });
         let ctx = self.clone();
-        self.widgets.mode_button.connect_clicked(move |button| {
-            ctx.show_mode_menu(button);
+        self.widgets.mode_button.connect_clicked(move |_| {
+            if ctx.state.borrow().browsing {
+                ctx.toggle_view_mode();
+            }
         });
         let ctx = self.clone();
         self.widgets.menubar.set_visible(false);
@@ -2321,7 +2343,14 @@ impl Ctx {
     }
 
     fn change_view_mode(&self, next: ViewMode) {
+        let browsing = self.state.borrow().browsing;
+        if browsing {
+            self.state.borrow_mut().browsing = false;
+        }
         if self.state.borrow().view_mode == next {
+            if browsing {
+                self.apply_view_mode();
+            }
             return;
         }
         let tick = {
@@ -2488,7 +2517,10 @@ impl Ctx {
 
     fn apply_view_mode(&self) {
         self.refresh_nav_path();
-        if self.state.borrow().browsing {
+        self.sync_view_dropdown();
+        let browsing = self.state.borrow().browsing;
+        self.widgets.mode_button.set_visible(browsing);
+        if browsing {
             self.widgets.content_stack.set_visible_child_name("folder");
             self.widgets
                 .mode_button
@@ -2505,18 +2537,13 @@ impl Ctx {
                 _ => "preview",
             };
             self.widgets.content_stack.set_visible_child_name(page);
-            self.widgets
-                .mode_button
-                .set_icon_name("view-reveal-symbolic");
-            self.widgets
-                .mode_button
-                .set_tooltip_text(Some("Только просмотр"));
             return;
         }
         let mode = self.state.borrow().view_mode;
         let markdown = path.as_ref().is_some_and(|path| is_markdown(path));
         let mode = if mode == ViewMode::Render && !markdown {
             self.state.borrow_mut().view_mode = ViewMode::Edit;
+            self.sync_view_dropdown();
             ViewMode::Edit
         } else {
             mode
@@ -2535,41 +2562,14 @@ impl Ctx {
         } else {
             self.widgets.content_stack.set_visible_child_name("edit");
         }
-        match mode {
-            ViewMode::Preview => {
-                self.widgets
-                    .mode_button
-                    .set_icon_name("document-edit-symbolic");
-                self.widgets
-                    .mode_button
-                    .set_tooltip_text(Some("Редактировать"));
-            }
-            ViewMode::Render => {
-                self.widgets
-                    .mode_button
-                    .set_icon_name("view-reveal-symbolic");
-                self.widgets
-                    .mode_button
-                    .set_tooltip_text(Some("Просмотр"));
-            }
-            ViewMode::Edit if markdown => {
-                self.widgets
-                    .mode_button
-                    .set_icon_name("view-paged-symbolic");
-                self.widgets
-                    .mode_button
-                    .set_tooltip_text(Some("Рендеринг"));
-            }
-            ViewMode::Edit => {
-                self.widgets
-                    .mode_button
-                    .set_icon_name("view-reveal-symbolic");
-                self.widgets
-                    .mode_button
-                    .set_tooltip_text(Some("Просмотр"));
-            }
-        }
         self.apply_render_mode_chrome();
+    }
+
+    fn sync_view_dropdown(&self) {
+        let index = mode_dropdown_index(self.state.borrow().view_mode);
+        if self.widgets.open_mode_dropdown.selected() != index {
+            self.widgets.open_mode_dropdown.set_selected(index);
+        }
     }
 
     fn show_catalog_menu(&self, anchor: &gtk4::Button) {

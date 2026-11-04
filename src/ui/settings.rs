@@ -179,9 +179,6 @@ impl Ctx {
 
     fn sync_open_dropdowns(&self, mode: ViewMode) {
         let index = super::mode_dropdown_index(mode);
-        if self.widgets.open_mode_dropdown.selected() != index {
-            self.widgets.open_mode_dropdown.set_selected(index);
-        }
         if let Some(dropdown) = self.widgets.open_mode_settings.borrow().clone() {
             if dropdown.selected() != index {
                 dropdown.set_selected(index);

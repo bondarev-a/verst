@@ -373,6 +373,22 @@ impl Session {
     }
 }
 
+/// Курсор файла обновляется на месте. Новый путь дописывается в конец.
+pub fn remember_caret(carets: &mut Vec<CaretPlace>, place: CaretPlace) {
+    if let Some(slot) = carets.iter_mut().find(|item| item.path == place.path) {
+        *slot = place;
+        return;
+    }
+    carets.push(place);
+}
+
+/// Новый файл дописывается в конец. Уже открытый остаётся на своём месте.
+pub fn remember_open(open_files: &mut Vec<PathBuf>, path: PathBuf) {
+    if !open_files.iter().any(|open| open == &path) {
+        open_files.push(path);
+    }
+}
+
 fn trim_open_files(session: &mut Session) {
     let limit = session.open_limit as usize;
     let panes: Vec<PathBuf> = session.pane_paths.iter().flatten().cloned().collect();
@@ -503,6 +519,62 @@ mod tests {
         assert_eq!(session.window_height, MIN_WINDOW_HEIGHT);
         assert_eq!(session.nav_width, 280);
         assert_eq!(session.info_width, 320);
+    }
+
+    #[test]
+    fn caret_of_a_file_stays_with_that_file() {
+        let mut carets = vec![CaretPlace {
+            path: PathBuf::from("/a"),
+            line: 4,
+            column: 2,
+        }];
+        remember_caret(
+            &mut carets,
+            CaretPlace {
+                path: PathBuf::from("/b"),
+                line: 1,
+                column: 0,
+            },
+        );
+        remember_caret(
+            &mut carets,
+            CaretPlace {
+                path: PathBuf::from("/a"),
+                line: 9,
+                column: 3,
+            },
+        );
+        assert_eq!(carets[0].line, 9);
+        assert_eq!(carets[0].column, 3);
+        assert_eq!(carets[1].path, PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn switching_an_open_file_keeps_its_place() {
+        let mut files = vec![
+            PathBuf::from("/a"),
+            PathBuf::from("/b"),
+            PathBuf::from("/c"),
+        ];
+        remember_open(&mut files, PathBuf::from("/a"));
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/c")
+            ]
+        );
+        remember_open(&mut files, PathBuf::from("/d"));
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/c"),
+                PathBuf::from("/d")
+            ]
+        );
     }
 
     #[test]
