@@ -143,11 +143,21 @@ impl Ctx {
     }
 
     pub(super) fn edit_undo(&self) {
-        self.focused_view().buffer().undo();
+        let buffer = self.focused_view().buffer();
+        if !buffer.can_undo() {
+            return;
+        }
+        buffer.undo();
+        self.schedule_render();
     }
 
     pub(super) fn edit_redo(&self) {
-        self.focused_view().buffer().redo();
+        let buffer = self.focused_view().buffer();
+        if !buffer.can_redo() {
+            return;
+        }
+        buffer.redo();
+        self.schedule_render();
     }
 
     pub(super) fn edit_select_all(&self) {
@@ -159,15 +169,7 @@ impl Ctx {
     }
 
     pub(super) fn jump_to_line(&self, line: usize) {
-        let pane = self.focused_index();
-        let view = self.widgets.views[pane].clone();
-        let buffer = view.buffer();
-        let Some(mut iter) = buffer.iter_at_line(line as i32) else {
-            return;
-        };
-        buffer.place_cursor(&iter);
-        view.scroll_to_iter(&mut iter, 0.1, true, 0.0, 0.3);
-        view.grab_focus();
+        self.place_cursor(self.focused_index(), line as u32, 0, true);
     }
 
     pub(super) fn editor_anchor_line(&self) -> Option<u32> {
@@ -410,14 +412,24 @@ impl Ctx {
             return;
         };
         let buffer = view.buffer();
-        let Some(mut iter) = buffer.iter_at_line(line as i32) else {
+        let last = (buffer.line_count() - 1).max(0);
+        let line = (line as i32).clamp(0, last);
+        let Some(mut iter) = buffer.iter_at_line(line) else {
             return;
         };
-        if column > 0 {
-            iter.forward_chars(column as i32);
+        let mut line_end = iter.clone();
+        if !line_end.ends_line() {
+            line_end.forward_to_line_end();
+        }
+        let max_col = line_end.line_offset().max(0) as u32;
+        let col = column.min(max_col);
+        if col > 0 {
+            iter.forward_chars(col as i32);
         }
         buffer.place_cursor(&iter);
-        view.scroll_to_iter(&mut iter, 0.1, true, 0.0, 0.3);
+        // use_align=false: только показать курсор. line_yrange сразу после
+        // set_buffer роняет GTK (кэш строк путает старый и новый буфер).
+        view.scroll_to_iter(&mut iter, 0.25, false, 0.0, 0.0);
         if focus {
             view.grab_focus();
         }

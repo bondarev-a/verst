@@ -57,18 +57,19 @@ window.verst .explorer-bar {
     border: 1px solid alpha(@theme_fg_color, 0.06);
 }
 window.verst .pathbar .path-label,
-window.verst .nav-path {
+window.verst entry.nav-path {
     font-family: monospace;
 }
 window.verst .workspace-main .pathbar {
     margin: 0 0 6px 0;
 }
-window.verst .nav-path {
+window.verst entry.nav-path {
     margin: 0 8px 6px 0;
     padding: 4px 8px;
     border-radius: 12px;
     background-color: alpha(@theme_fg_color, 0.05);
     border: 1px solid alpha(@theme_fg_color, 0.06);
+    min-height: 28px;
 }
 window.verst .statusbar {
     margin: 6px 16px 8px 16px;
@@ -173,7 +174,7 @@ window.verst button.row-action:hover {
 window.verst button.suggested-action,
 window.verst button.flat.suggested-action,
 window.verst button.tag-chip.tag-chip-on,
-window.verst .pinbar .linked > button.suggested-action,
+window.verst .pinbar .open-chip button.pin-name.suggested-action,
 window.verst button.row-action.suggested-action,
 window.verst togglebutton.flat:checked {
     background-image: none;
@@ -184,7 +185,7 @@ window.verst togglebutton.flat:checked {
 }
 window.verst button.suggested-action:hover,
 window.verst button.flat.suggested-action:hover,
-window.verst .pinbar .linked > button.suggested-action:hover {
+window.verst .pinbar .open-chip button.pin-name.suggested-action:hover {
     background-color: shade(@theme_selected_bg_color, 0.92);
 }
 window.verst .activity-bar {
@@ -250,8 +251,8 @@ window.verst entry,
 window.verst dropdown > button {
     border-radius: 10px;
 }
-window.verst .pinbar .linked > button {
-    border-radius: 0;
+window.verst .pinbar .open-chip button.pin-name {
+    border-radius: 999px;
     background-image: none;
     background-color: alpha(@theme_fg_color, 0.08);
     color: @theme_fg_color;
@@ -260,12 +261,20 @@ window.verst .pinbar .linked > button {
     min-height: 28px;
     padding: 4px 12px;
 }
-window.verst .pinbar .linked > button:first-child {
-    border-radius: 999px 0 0 999px;
+window.verst .pinbar .open-chip button.pin-close {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 2px;
+    border-radius: 999px;
+    background: none;
+    border: none;
+    box-shadow: none;
+    opacity: 0.45;
 }
-window.verst .pinbar .linked > button:last-child {
-    border-radius: 0 999px 999px 0;
-    padding: 4px 8px;
+window.verst .pinbar .open-chip:hover button.pin-close,
+window.verst .pinbar .open-chip button.pin-close:hover {
+    opacity: 1;
+    background-color: alpha(@theme_fg_color, 0.10);
 }
 window.verst .side-caption {
     margin: 10px 12px 2px 12px;
@@ -348,13 +357,25 @@ window.verst entry.tw-md-cell {
     border: none;
     border-right: 1px solid alpha(@theme_fg_color, 0.12);
     border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
-    background: transparent;
+    background-color: @theme_base_color;
+    color: @theme_fg_color;
+    caret-color: @theme_fg_color;
     padding: 4px 8px;
     min-height: 26px;
 }
+window.verst entry.tw-md-cell:focus {
+    background-color: @theme_base_color;
+    color: @theme_fg_color;
+    caret-color: @theme_fg_color;
+    box-shadow: inset 0 0 0 2px @theme_selected_bg_color;
+}
+window.verst entry.tw-md-cell selection {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
 window.verst entry.tw-md-cell-head {
     font-weight: bold;
-    background-color: alpha(@theme_fg_color, 0.05);
+    background-color: alpha(@theme_fg_color, 0.08);
 }
 window.verst paned > separator {
     background-image: none;

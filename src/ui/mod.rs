@@ -111,6 +111,26 @@ fn fill_path_rows(list: &gtk4::ListBox, files: &[PathBuf]) {
     }
 }
 
+fn expand_typed_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return PathBuf::new();
+    }
+    if trimmed == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        let mut home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        home.push(rest);
+        return home;
+    }
+    PathBuf::from(trimmed)
+}
+
 fn note_row(list: &gtk4::ListBox, text: &str) {
     let label = gtk4::Label::new(Some(text));
     label.set_halign(gtk4::Align::Start);
@@ -176,6 +196,7 @@ struct State {
     pending_jump: Option<u32>,
     /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
     keep_space_tree: bool,
+    preview_tick: u64,
 }
 
 #[derive(Clone)]
@@ -238,7 +259,7 @@ struct Widgets {
     workspace_lists: Rc<RefCell<Vec<gtk4::ListView>>>,
     workspace_folds: Rc<RefCell<Vec<gtk4::Expander>>>,
     path_label: gtk4::Label,
-    nav_path: gtk4::Label,
+    nav_path: gtk4::Entry,
     back_button: gtk4::Button,
     forward_button: gtk4::Button,
     doc_label: gtk4::Label,
@@ -494,13 +515,11 @@ impl Ctx {
         left.set_hexpand(true);
         left.set_vexpand(true);
         left_shell.set_overflow(gtk4::Overflow::Hidden);
-        let nav_path = gtk4::Label::new(None);
+        let nav_path = gtk4::Entry::new();
         nav_path.add_css_class("path-label");
         nav_path.add_css_class("nav-path");
-        nav_path.set_halign(gtk4::Align::Start);
-        nav_path.set_xalign(0.0);
         nav_path.set_hexpand(true);
-        nav_path.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+        nav_path.set_placeholder_text(Some("Путь к каталогу"));
         nav_path.set_visible(false);
         let nav_column = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         nav_column.set_hexpand(true);
@@ -959,6 +978,7 @@ impl Ctx {
                 render: RenderState::default(),
                 pending_jump: None,
                 keep_space_tree: false,
+                preview_tick: 0,
             })),
             widgets,
         };
@@ -1138,6 +1158,20 @@ impl Ctx {
     fn bind(&self) {
         self.install_external_drop();
         self.install_render_clicks();
+        let ctx = self.clone();
+        self.widgets.nav_path.connect_activate(move |_| {
+            ctx.submit_nav_path();
+        });
+        let escape = gtk4::EventControllerKey::new();
+        let ctx = self.clone();
+        escape.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Escape {
+                ctx.fill_nav_path(true);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        self.widgets.nav_path.add_controller(escape);
         let ctx = self.clone();
         self.widgets.window.connect_close_request(move |_| {
             ctx.save_session();
@@ -2234,8 +2268,10 @@ impl Ctx {
             let ctx = self.clone();
             let close_path = path.clone();
             close.connect_clicked(move |_| ctx.close_file(&close_path));
-            let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-            group.add_css_class("linked");
+            close.set_has_frame(false);
+            close.set_valign(gtk4::Align::Center);
+            let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
+            group.add_css_class("open-chip");
             group.append(&button);
             group.append(&close);
             self.widgets.pins_box.append(&group);
@@ -2559,6 +2595,7 @@ impl Ctx {
         }
         if show_preview {
             self.widgets.content_stack.set_visible_child_name("preview");
+            self.refresh_preview_now();
         } else {
             self.widgets.content_stack.set_visible_child_name("edit");
         }
@@ -2790,9 +2827,19 @@ impl Ctx {
     }
 
     fn schedule_preview(&self) {
+        let tick = {
+            let mut state = self.state.borrow_mut();
+            state.preview_tick = state.preview_tick.wrapping_add(1);
+            state.preview_tick
+        };
         let ctx = self.clone();
         glib::timeout_add_local_once(Duration::from_millis(PREVIEW_MS), move || {
-            ctx.refresh_preview_now()
+            if ctx.state.borrow().preview_tick != tick {
+                return;
+            }
+            ctx.refresh_outline();
+            ctx.refresh_file_facts();
+            ctx.refresh_preview_now();
         });
         self.schedule_render();
     }
@@ -2923,6 +2970,7 @@ impl Ctx {
     fn refresh_preview_now(&self) {
         self.sync_open_tags();
         self.refresh_tag_chips();
+        let view_mode = self.state.borrow().view_mode;
         let Some(path) = self.focused_path() else {
             self.clear_picture();
             self.widgets
@@ -2995,6 +3043,10 @@ impl Ctx {
                     "<p>Предпросмотр доступен для Markdown, HTML и SVG.</p>",
                     None,
                 );
+            return;
+        }
+        if view_mode != ViewMode::Preview {
+            self.refresh_backlinks();
             return;
         }
         let Some(text) = self.buffer_text(&path) else {
@@ -3916,6 +3968,10 @@ impl Ctx {
 
     /// Каталог левой панели: выбранная строка дерева, иначе каталог открытого файла.
     fn refresh_nav_path(&self) {
+        self.fill_nav_path(false);
+    }
+
+    fn fill_nav_path(&self, overwrite_edit: bool) {
         let (open, panel) = {
             let session = &self.state.borrow().session;
             (session.nav_open, session.left_panel.clone())
@@ -3945,9 +4001,86 @@ impl Ctx {
                 return;
             }
         };
-        self.widgets.nav_path.set_text(&text);
-        self.widgets.nav_path.set_tooltip_text(tip.as_deref());
+        self.fill_nav_path_value(text, tip, overwrite_edit);
+    }
+
+    fn fill_nav_path_value(&self, text: String, tip: Option<String>, overwrite_edit: bool) {
         self.widgets.nav_path.set_visible(true);
+        self.widgets.nav_path.set_tooltip_text(tip.as_deref());
+        if !overwrite_edit && self.widgets.nav_path.has_focus() {
+            return;
+        }
+        if self.widgets.nav_path.text().as_str() != text {
+            self.widgets.nav_path.set_text(&text);
+        }
+    }
+
+    fn submit_nav_path(&self) {
+        let raw = self.widgets.nav_path.text().to_string();
+        let path = expand_typed_path(&raw);
+        if path.as_os_str().is_empty() {
+            self.set_status("Введите путь");
+            return;
+        }
+        if path.is_file() {
+            self.go(path, None);
+            return;
+        }
+        if !path.is_dir() {
+            self.set_status("Нет такого пути");
+            return;
+        }
+        let panel = self.state.borrow().session.left_panel.clone();
+        match panel.as_str() {
+            "workspace" => {
+                if let Some(pin) = self.pin_path() {
+                    if path.starts_with(&pin) {
+                        self.state.borrow_mut().nav_dir = Some(path.clone());
+                        self.open_space_tree();
+                        if let Some(list) = self.widgets.workspace_list.borrow().clone() {
+                            reveal_in_tree(
+                                list,
+                                pin,
+                                path.clone(),
+                                self.tree_notice(),
+                            );
+                        }
+                        self.show_folder(path);
+                        self.refresh_nav_path();
+                        return;
+                    }
+                }
+                self.show_panel("disk");
+                self.go_disk_directory(path);
+            }
+            "notes" => {
+                let notes = text_workspace::notes::notes_dir();
+                if path == notes || path.starts_with(&notes) {
+                    self.state.borrow_mut().nav_dir = Some(path);
+                    self.refresh_notes();
+                    self.refresh_nav_path();
+                    return;
+                }
+                self.show_panel("disk");
+                self.go_disk_directory(path);
+            }
+            _ => self.go_disk_directory(path),
+        }
+    }
+
+    fn go_disk_directory(&self, path: PathBuf) {
+        self.show_panel("disk");
+        self.state.borrow_mut().nav_dir = Some(path.clone());
+        if let Some(list) = self.widgets.disk_list.borrow().clone() {
+            reveal_in_tree(
+                list,
+                PathBuf::from("/"),
+                path.clone(),
+                self.tree_notice(),
+            );
+        }
+        self.show_folder(path);
+        self.refresh_nav_path();
     }
 
     fn disk_directory(&self) -> PathBuf {

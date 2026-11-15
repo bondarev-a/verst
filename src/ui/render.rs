@@ -203,13 +203,11 @@ impl Ctx {
             .collect();
         for buffer in &buffers {
             self.state.borrow_mut().render.writing = true;
-            buffer.begin_irreversible_action();
             remove_anchors(
                 &buffer.clone().upcast::<gtk4::TextBuffer>(),
                 &tables,
                 &images,
             );
-            buffer.end_irreversible_action();
             self.state.borrow_mut().render.writing = false;
             clear_render_tags(buffer);
         }
@@ -521,8 +519,7 @@ impl Ctx {
                 && state.render.image_keys == image_keys
         };
         if same_widgets {
-            paint_tags(buffer, &text, &spans, cursor_line);
-            cover_embedded_source(buffer, &text, &md_tables, &spans, cursor_line);
+            let prev_line = self.state.borrow().render.cursor_line;
             {
                 let mut state = self.state.borrow_mut();
                 if state.render.tables.len() == md_tables.len() {
@@ -537,13 +534,22 @@ impl Ctx {
                         live.end_line = end_line;
                     }
                 }
-                lift_embedded(
-                    buffer,
-                    &state.render.tables,
-                    &state.render.images,
-                );
             }
             self.store_paint(&text, spans, cursor_line, bodies, image_keys);
+            let (spans, line_starts, text_len) = {
+                let render = &self.state.borrow().render;
+                (
+                    render.spans.clone(),
+                    render.line_starts.clone(),
+                    render.text_len,
+                )
+            };
+            if let Some(prev) = prev_line {
+                if prev != cursor_line {
+                    retag_cursor_line(buffer, &spans, &line_starts, text_len, prev, false);
+                }
+            }
+            retag_cursor_line(buffer, &spans, &line_starts, text_len, cursor_line, true);
             return;
         }
 
@@ -566,13 +572,11 @@ impl Ctx {
         }
 
         self.state.borrow_mut().render.writing = true;
-        buffer.begin_irreversible_action();
         remove_anchors(
             &buffer.clone().upcast::<gtk4::TextBuffer>(),
             &old_tables,
             &old_images,
         );
-        buffer.end_irreversible_action();
         self.state.borrow_mut().render.writing = false;
 
         paint_tags(buffer, &text, &spans, cursor_line);
@@ -603,7 +607,6 @@ impl Ctx {
         let mut live_images = Vec::new();
 
         self.state.borrow_mut().render.writing = true;
-        buffer.begin_irreversible_action();
         for place in placements {
             match place {
                 Placement::Table { index, .. } => {
@@ -621,7 +624,6 @@ impl Ctx {
                 }
             }
         }
-        buffer.end_irreversible_action();
         self.state.borrow_mut().render.writing = false;
         cover_embedded_source(buffer, &text, &md_tables, &spans, cursor_line);
         lift_embedded(buffer, &live_tables, &live_images);
@@ -818,11 +820,26 @@ fn build_table_grid(
             });
 
             let key = gtk4::EventControllerKey::new();
+            key.set_propagation_phase(gtk4::PropagationPhase::Capture);
             let ctx_key = ctx.clone();
             let path_key = path.to_path_buf();
             let grid_key = grid.clone();
             let focus_key = focus_cell.clone();
-            key.connect_key_pressed(move |_, keyval, _, _| {
+            key.connect_key_pressed(move |_, keyval, _, modifier| {
+                let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+                let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
+                if ctrl && (keyval == gdk::Key::z || keyval == gdk::Key::Z) {
+                    if shift {
+                        ctx_key.edit_redo();
+                    } else {
+                        ctx_key.edit_undo();
+                    }
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && (keyval == gdk::Key::y || keyval == gdk::Key::Y) {
+                    ctx_key.edit_redo();
+                    return glib::Propagation::Stop;
+                }
                 if keyval == gdk::Key::Tab {
                     let (nr, nc) = if col + 1 < cols {
                         (row, col + 1)
@@ -1000,11 +1017,23 @@ fn retag_cursor_line(
         to = buffer.end_iter();
     }
     let table = buffer.tag_table();
-    if let Some(tag) = table.lookup(TAG_HIDE) {
-        buffer.remove_tag(&tag, &from, &to);
+    for name in [
+        TAG_HIDE,
+        TAG_MONO,
+        TAG_STRONG,
+        TAG_EM,
+        TAG_CODE,
+        TAG_CODEBLOCK,
+        TAG_LINK,
+    ] {
+        if let Some(tag) = table.lookup(name) {
+            buffer.remove_tag(&tag, &from, &to);
+        }
     }
-    if let Some(tag) = table.lookup(TAG_MONO) {
-        buffer.remove_tag(&tag, &from, &to);
+    for name in TAG_HEADING {
+        if let Some(tag) = table.lookup(name) {
+            buffer.remove_tag(&tag, &from, &to);
+        }
     }
     let line_text = buffer.text(&from, &to, false);
     if on_cursor {
@@ -1020,12 +1049,27 @@ fn retag_cursor_line(
         let piece_start = span.start.max(start);
         let piece_end = span.end.min(end);
         match &span.kind {
+            MarkKind::Heading { level } => {
+                let name = TAG_HEADING
+                    .get((*level as usize).saturating_sub(1))
+                    .copied()
+                    .unwrap_or("tw-h6");
+                pieces.push((piece_start, piece_end, name));
+            }
             MarkKind::HeadingMark | MarkKind::Delimiter | MarkKind::LinkMarkup if !on_cursor => {
                 pieces.push((piece_start, piece_end, TAG_HIDE));
             }
-            MarkKind::Code | MarkKind::CodeBlock => {
+            MarkKind::Strong => pieces.push((piece_start, piece_end, TAG_STRONG)),
+            MarkKind::Emphasis => pieces.push((piece_start, piece_end, TAG_EM)),
+            MarkKind::Code => {
+                pieces.push((piece_start, piece_end, TAG_CODE));
                 pieces.push((piece_start, piece_end, TAG_MONO));
             }
+            MarkKind::CodeBlock => {
+                pieces.push((piece_start, piece_end, TAG_CODEBLOCK));
+                pieces.push((piece_start, piece_end, TAG_MONO));
+            }
+            MarkKind::Link { .. } => pieces.push((piece_start, piece_end, TAG_LINK)),
             MarkKind::Image { .. } if !on_cursor => {
                 pieces.push((piece_start, piece_end, TAG_HIDE));
             }
@@ -1152,15 +1196,16 @@ fn clear_render_tags(buffer: &sourceview5::Buffer) {
     }
 }
 
-/// Служебный текст не помечается invisible: на длинном файле GTK при прокрутке
-/// падает с «Byte index is off the end of the line».
+/// Служебный текст только прозрачный. invisible и scale≈0 ломают кэш строк
+/// GTK при прокрутке (gtktextbtree / gtktextlinedisplaycache).
 fn hide_source(tag: &gtk4::TextTag) {
-    tag.set_scale(0.001);
+    tag.set_scale(1.0);
     tag.set_foreground_rgba(Some(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)));
 }
 
 fn ensure_tag(table: &gtk4::TextTagTable, name: &str, configure: impl FnOnce(&gtk4::TextTag)) {
-    if table.lookup(name).is_some() {
+    if let Some(tag) = table.lookup(name) {
+        configure(&tag);
         return;
     }
     let tag = gtk4::TextTag::new(Some(name));

@@ -68,6 +68,7 @@ impl Ctx {
         if let Some(buffer) = buffer {
             self.widgets.views[pane].set_buffer(Some(&buffer));
             self.apply_profile(&self.widgets.views[pane]);
+            self.widgets.views[pane].queue_allocate();
         } else if !text_file {
             self.widgets.views[pane].set_buffer(Some(&self.widgets.empty_buffer));
         }
@@ -192,8 +193,6 @@ impl Ctx {
                 ctx.refresh_open_list();
             }
             ctx.schedule_preview();
-            ctx.refresh_outline();
-            ctx.refresh_file_facts();
         });
         let monitor = watch_file(path, self.clone());
         self.state.borrow_mut().buffers.insert(
