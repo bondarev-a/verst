@@ -195,6 +195,13 @@ impl Ctx {
             }
             ctx.schedule_preview();
         });
+        let ctx = self.clone();
+        buffer.connect_mark_set(move |_, _, mark| {
+            let name = mark.name().map(|name| name.to_string()).unwrap_or_default();
+            if name == "insert" || name == "selection_bound" {
+                ctx.sync_ask_chip();
+            }
+        });
         let monitor = watch_file(path, self.clone());
         self.state.borrow_mut().buffers.insert(
             path.to_path_buf(),

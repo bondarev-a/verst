@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 use sourceview5::prelude::{BufferExt, ViewExt};
+use text_workspace::inference::{Access, AccessDraft, KeyPlace, Provider};
 use text_workspace::session::{self, ViewMode};
 use text_workspace::zoom;
 
@@ -82,8 +83,7 @@ impl Ctx {
         });
         box_.append(&labeled("Тема исходника", &theme_dropdown));
 
-        let open_mode =
-            gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
+        let open_mode = gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
         open_mode.set_selected(super::mode_dropdown_index(session.open_mode));
         open_mode.set_tooltip_text(Some(
             "Как открывать следующий файл. Кнопка в углу переключает вид текущего.",
@@ -114,7 +114,9 @@ impl Ctx {
         zoom_spin.set_numeric(true);
         zoom_spin.set_width_chars(4);
         zoom_spin.set_value(f64::from(session.zoom_pt));
-        zoom_spin.set_tooltip_text(Some("Интерфейс: дерево, меню, кнопки. Клавиши Ctrl++ и Ctrl+−."));
+        zoom_spin.set_tooltip_text(Some(
+            "Интерфейс: дерево, меню, кнопки. Клавиши Ctrl++ и Ctrl+−.",
+        ));
         let ctx = self.clone();
         zoom_spin.connect_value_changed(move |spin| {
             ctx.set_zoom_pt(spin.value() as i32);
@@ -155,7 +157,15 @@ impl Ctx {
         sample_frame.set_valign(gtk4::Align::Start);
         columns.append(&box_);
         columns.append(&sample_frame);
-        window.set_child(Some(&columns));
+        let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        page.append(&columns);
+        mount_inference(&page);
+        let scroll = gtk4::ScrolledWindow::new();
+        scroll.set_child(Some(&page));
+        scroll.set_propagate_natural_width(true);
+        scroll.set_min_content_height(420);
+        window.set_child(Some(&scroll));
+        window.set_default_height(680);
         let preferences = self.widgets.preferences.clone();
         let zoom_slot = self.widgets.zoom_spin.clone();
         let text_slot = self.widgets.text_spin.clone();
@@ -258,6 +268,220 @@ impl Ctx {
             "Перенос строк выключен"
         });
     }
+}
+
+fn mount_inference(page: &gtk4::Box) {
+    let access = Access::load();
+    let frame = gtk4::Frame::new(Some("Инференс"));
+    frame.set_margin_start(16);
+    frame.set_margin_end(16);
+    frame.set_margin_bottom(16);
+    let box_ = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
+
+    let provider = gtk4::DropDown::from_strings(&["OpenAI-совместимый", "Anthropic", "Выключен"]);
+    provider.set_selected(provider_index(access.provider));
+    provider.set_tooltip_text(Some(
+        "OpenAI-совместимый адрес получает /chat/completions. Anthropic — /v1/messages. Выключен не отправляет выделение.",
+    ));
+
+    let base_url = gtk4::Entry::new();
+    base_url.set_text(&access.base_url);
+    base_url.set_hexpand(true);
+    base_url.set_placeholder_text(Some("https://api.openai.com/v1"));
+    base_url.set_tooltip_text(Some(
+        "Базовый адрес, как base_url в AIGent. Без завершающего слэша тоже подходит.",
+    ));
+
+    let model = gtk4::Entry::new();
+    model.set_text(&access.model);
+    model.set_hexpand(true);
+    model.set_placeholder_text(Some("имя модели"));
+    model.set_tooltip_text(Some("Имя модели на этом адресе."));
+
+    let api_key = gtk4::PasswordEntry::new();
+    api_key.set_show_peek_icon(true);
+    api_key.set_hexpand(true);
+    let key_placeholder = if access.api_key.is_empty() {
+        "ключ"
+    } else {
+        "ключ записан, пустое поле его не меняет"
+    };
+    api_key.set_placeholder_text(Some(key_placeholder));
+    api_key.set_tooltip_text(Some(
+        "Пустое поле не меняет уже записанный ключ. Если ключ в файле пуст, читается переменная окружения.",
+    ));
+
+    let api_key_env = gtk4::Entry::new();
+    api_key_env.set_text(&access.api_key_env);
+    api_key_env.set_hexpand(true);
+    api_key_env.set_tooltip_text(Some(
+        "Имя переменной, если ключ в файле пустой. По умолчанию LLM_API_KEY.",
+    ));
+
+    let key_line = gtk4::Label::new(None);
+    key_line.set_halign(gtk4::Align::Start);
+    key_line.set_xalign(0.0);
+    key_line.add_css_class("dim-label");
+    key_line.set_wrap(true);
+    paint_key_line(&key_line, &access);
+
+    let hint = gtk4::Label::new(Some(
+        "В запрос уходит только выделенный фрагмент. Записанный ключ важнее переменной окружения.",
+    ));
+    hint.set_halign(gtk4::Align::Start);
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    hint.add_css_class("dim-label");
+
+    let status = gtk4::Label::new(None);
+    status.set_halign(gtk4::Align::Start);
+    status.set_xalign(0.0);
+
+    let save = gtk4::Button::with_label("Сохранить доступ");
+    save.add_css_class("suggested-action");
+    let clear = gtk4::Button::with_label("Стереть ключ");
+    clear.set_tooltip_text(Some("Стирает записанный ключ и сохраняет остальные поля."));
+
+    let provider_save = provider.clone();
+    let base_url_save = base_url.clone();
+    let model_save = model.clone();
+    let api_key_save = api_key.clone();
+    let env_save = api_key_env.clone();
+    let key_line_save = key_line.clone();
+    let status_save = status.clone();
+    save.connect_clicked(move |_| {
+        write_inference(
+            &provider_save,
+            &base_url_save,
+            &model_save,
+            &api_key_save,
+            &env_save,
+            false,
+            &key_line_save,
+            &status_save,
+        );
+    });
+    let provider_clear = provider.clone();
+    let base_url_clear = base_url.clone();
+    let model_clear = model.clone();
+    let api_key_clear = api_key.clone();
+    let env_clear = api_key_env.clone();
+    let key_line_clear = key_line.clone();
+    let status_clear = status.clone();
+    clear.connect_clicked(move |_| {
+        api_key_clear.set_text("");
+        write_inference(
+            &provider_clear,
+            &base_url_clear,
+            &model_clear,
+            &api_key_clear,
+            &env_clear,
+            true,
+            &key_line_clear,
+            &status_clear,
+        );
+    });
+
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    buttons.append(&save);
+    buttons.append(&clear);
+
+    box_.append(&field("Провайдер", &provider));
+    box_.append(&field("Адрес", &base_url));
+    box_.append(&field("Модель", &model));
+    box_.append(&field("Ключ", &api_key));
+    box_.append(&field("Переменная", &api_key_env));
+    box_.append(&key_line);
+    box_.append(&hint);
+    box_.append(&buttons);
+    box_.append(&status);
+    frame.set_child(Some(&box_));
+    page.append(&frame);
+}
+
+fn write_inference(
+    provider: &gtk4::DropDown,
+    base_url: &gtk4::Entry,
+    model: &gtk4::Entry,
+    api_key: &gtk4::PasswordEntry,
+    api_key_env: &gtk4::Entry,
+    clear_key: bool,
+    key_line: &gtk4::Label,
+    status: &gtk4::Label,
+) {
+    let mut access = Access::load();
+    access.apply_draft(AccessDraft {
+        provider: provider_from_index(provider.selected()),
+        base_url: base_url.text().to_string(),
+        api_key: api_key.text().to_string(),
+        clear_key,
+        api_key_env: api_key_env.text().to_string(),
+        model: model.text().to_string(),
+    });
+    match access.save() {
+        Ok(()) => {
+            paint_key_line(key_line, &access);
+            if access.api_key.is_empty() {
+                api_key.set_placeholder_text(Some("ключ"));
+            } else {
+                api_key.set_text("");
+                api_key.set_placeholder_text(Some("ключ записан, пустое поле его не меняет"));
+            }
+            status.remove_css_class("ask-error");
+            status.set_text(if clear_key {
+                "Ключ стёрт"
+            } else {
+                "Доступ сохранён"
+            });
+        }
+        Err(err) => {
+            status.add_css_class("ask-error");
+            status.set_text(&format!("Не удалось записать настройки: {err}"));
+        }
+    }
+}
+
+fn paint_key_line(label: &gtk4::Label, access: &Access) {
+    let text = match access.key_place() {
+        KeyPlace::File => "Ключ записан в файле настроек.".to_string(),
+        KeyPlace::Env => format!(
+            "Сохранённого ключа нет, при запросе берётся {}.",
+            access.api_key_env
+        ),
+        KeyPlace::Missing => "Ключ не задан.".to_string(),
+    };
+    label.set_text(&text);
+}
+
+fn provider_index(provider: Provider) -> u32 {
+    match provider {
+        Provider::OpenaiCompatible => 0,
+        Provider::Anthropic => 1,
+        Provider::None => 2,
+    }
+}
+
+fn provider_from_index(index: u32) -> Provider {
+    match index {
+        1 => Provider::Anthropic,
+        2 => Provider::None,
+        _ => Provider::OpenaiCompatible,
+    }
+}
+
+fn field(title: &str, control: &impl gtk4::prelude::IsA<gtk4::Widget>) -> gtk4::Box {
+    let row = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    let label = gtk4::Label::new(Some(title));
+    label.set_halign(gtk4::Align::Start);
+    label.add_css_class("dim-label");
+    control.set_halign(gtk4::Align::Fill);
+    row.append(&label);
+    row.append(control);
+    row
 }
 
 fn style_sample() -> sourceview5::Buffer {

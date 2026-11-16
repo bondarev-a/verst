@@ -139,7 +139,13 @@ pub fn parse_tables(source: &str) -> Vec<MdTable> {
 }
 
 /// Заменить текст ячейки (`row` 0 — заголовок). Один кусок в файле.
-pub fn replace_cell(source: &str, table: usize, row: usize, col: usize, text: &str) -> Option<String> {
+pub fn replace_cell(
+    source: &str,
+    table: usize,
+    row: usize,
+    col: usize,
+    text: &str,
+) -> Option<String> {
     let tables = parse_tables(source);
     let cell = tables.get(table)?.cell(row, col)?;
     let mut out = String::with_capacity(source.len() + text.len());
@@ -162,7 +168,11 @@ pub fn insert_row_at(source: &str, table: usize, at: usize) -> Option<String> {
         let mut rows = row_strings(item);
         let at = at.min(rows.len());
         rows.insert(at, vec!["  ".to_string(); cols]);
-        Some(format_md_table(&header_strings(item), &item.alignments, &rows))
+        Some(format_md_table(
+            &header_strings(item),
+            &item.alignments,
+            &rows,
+        ))
     })
 }
 
@@ -178,7 +188,11 @@ pub fn delete_row_at(source: &str, table: usize, row: usize) -> Option<String> {
             return None;
         }
         rows.remove(index);
-        Some(format_md_table(&header_strings(item), &item.alignments, &rows))
+        Some(format_md_table(
+            &header_strings(item),
+            &item.alignments,
+            &rows,
+        ))
     })
 }
 
@@ -226,7 +240,11 @@ pub fn delete_column_at(source: &str, table: usize, col: usize) -> Option<String
     })
 }
 
-fn splice_table(source: &str, table: usize, edit: impl FnOnce(&MdTable) -> Option<String>) -> Option<String> {
+fn splice_table(
+    source: &str,
+    table: usize,
+    edit: impl FnOnce(&MdTable) -> Option<String>,
+) -> Option<String> {
     let tables = parse_tables(source);
     let item = tables.get(table)?;
     let rebuilt = edit(item)?;
@@ -347,7 +365,9 @@ fn is_align_line(line: &str) -> bool {
     if !trimmed.contains("---") {
         return false;
     }
-    trimmed.chars().all(|ch| matches!(ch, '|' | ':' | '-' | ' ' | '\t'))
+    trimmed
+        .chars()
+        .all(|ch| matches!(ch, '|' | ':' | '-' | ' ' | '\t'))
 }
 
 fn pipe_row_cells(source: &str, line_start: usize, line: &str) -> Vec<TableCell> {

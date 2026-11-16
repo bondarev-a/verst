@@ -19,9 +19,7 @@ fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local")
-        .join("share")
-        .join("text_workspace")
+    home.join(".local").join("share").join("text_workspace")
 }
 
 pub fn note_title(raw: &str) -> String {

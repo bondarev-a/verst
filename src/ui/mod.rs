@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -139,6 +139,7 @@ fn note_row(list: &gtk4::ListBox, text: &str) {
     list.append(&label);
 }
 
+mod ask;
 mod files;
 mod navigate;
 mod notes;
@@ -279,6 +280,25 @@ struct Widgets {
     folder_crumbs: gtk4::Box,
     folder_up: gtk4::Button,
     mode_button: gtk4::Button,
+    editor_overlay: gtk4::Overlay,
+    ask_chip: gtk4::Button,
+    ask_popover: gtk4::Popover,
+    ask_quote: gtk4::Label,
+    ask_entry: gtk4::Entry,
+    ask_send: gtk4::Button,
+    ask_answer: gtk4::Label,
+    ask_answer_scroll: gtk4::ScrolledWindow,
+    ask_replace: gtk4::Button,
+    ask_insert: gtk4::Button,
+    ask_note: gtk4::Label,
+    ask_log: gtk4::Box,
+    ask_pending: Rc<RefCell<Option<ask::PendingAsk>>>,
+    ask_hold: Rc<RefCell<Option<ask::AskHold>>>,
+    ask_seen: Rc<RefCell<Option<ask::Seen>>>,
+    ask_frozen: Rc<Cell<bool>>,
+    ask_hover: Rc<Cell<bool>>,
+    ask_waiting: Rc<Cell<bool>>,
+    ask_gen: Rc<Cell<u64>>,
     status: gtk4::Label,
     css: gtk4::CssProvider,
     text_css: gtk4::CssProvider,
@@ -379,6 +399,20 @@ impl Ctx {
         let history_list = gtk4::ListBox::new();
         history_list.add_css_class("navigation-sidebar");
         history_list.add_css_class("file-list");
+        let files_caption = gtk4::Label::new(Some("Файлы"));
+        files_caption.add_css_class("dim-label");
+        files_caption.add_css_class("side-caption");
+        files_caption.set_halign(gtk4::Align::Start);
+        let requests_caption = gtk4::Label::new(Some("Запросы"));
+        requests_caption.add_css_class("dim-label");
+        requests_caption.add_css_class("side-caption");
+        requests_caption.set_halign(gtk4::Align::Start);
+        let ask_log = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+        let history_page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        history_page.append(&files_caption);
+        history_page.append(&scrolled(&history_list));
+        history_page.append(&requests_caption);
+        history_page.append(&scrolled(&ask_log));
         workspace_slot.set_vexpand(true);
         let disk_placeholder = gtk4::Label::new(Some("Проводник"));
         let notes_new = gtk4::Button::with_label("Новая заметка");
@@ -473,7 +507,7 @@ impl Ctx {
                 ("disk", disk_placeholder.upcast()),
                 ("workspace", workspace_slot.clone().upcast()),
                 ("notes", notes_page.upcast()),
-                ("history", scrolled(&history_list).upcast()),
+                ("history", history_page.upcast()),
             ],
         );
         left.set_width_request(session::NAV_MIN_WIDTH);
@@ -748,9 +782,12 @@ impl Ctx {
         info_shell.set_hexpand(false);
         info_shell.append(&doc_side);
         info_shell.append(&info_rail);
+        let ask = ask::build_ask();
         let content = gtk4::Overlay::new();
         content.set_child(Some(&content_stack));
         content.add_overlay(&mode_button);
+        content.add_overlay(&ask.chip);
+        let editor_overlay = content.clone();
         content.set_hexpand(true);
         content.set_vexpand(true);
 
@@ -981,6 +1018,25 @@ impl Ctx {
             folder_crumbs,
             folder_up,
             mode_button,
+            editor_overlay,
+            ask_chip: ask.chip,
+            ask_popover: ask.popover,
+            ask_quote: ask.quote,
+            ask_entry: ask.entry,
+            ask_send: ask.send,
+            ask_answer: ask.answer,
+            ask_answer_scroll: ask.answer_scroll,
+            ask_replace: ask.replace,
+            ask_insert: ask.insert,
+            ask_note: ask.note,
+            ask_log,
+            ask_pending: ask.pending,
+            ask_hold: ask.hold,
+            ask_seen: ask.seen,
+            ask_frozen: ask.frozen,
+            ask_hover: ask.hover,
+            ask_waiting: ask.waiting,
+            ask_gen: ask.generation,
             status,
             css,
             text_css,
@@ -1028,6 +1084,7 @@ impl Ctx {
         };
         ctx.install_actions(app);
         ctx.bind();
+        ctx.install_ask_watch();
         ctx.mount_disk();
         ctx.rebuild_pins();
         ctx.mount_workspace();
@@ -1454,6 +1511,7 @@ impl Ctx {
                 ctx.state.borrow_mut().session.focused_pane = pane;
                 ctx.follow_focus();
                 ctx.autohide_docks();
+                ctx.sync_ask_chip();
             });
             self.widgets.views[pane].add_controller(focus);
         }
@@ -2698,6 +2756,7 @@ impl Ctx {
             self.widgets.content_stack.set_visible_child_name("edit");
         }
         self.apply_render_mode_chrome();
+        self.sync_ask_chip();
     }
 
     fn sync_view_dropdown(&self) {

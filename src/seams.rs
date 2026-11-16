@@ -166,7 +166,11 @@ const COMMANDS: &[CommandSpec] = &[
         id: "text_zoom_in",
         title: "Увеличить текст",
         section: "Вид",
-        accels: &["<Control><Shift>plus", "<Control><Shift>equal", "<Control><Shift>KP_Add"],
+        accels: &[
+            "<Control><Shift>plus",
+            "<Control><Shift>equal",
+            "<Control><Shift>KP_Add",
+        ],
     },
     CommandSpec {
         id: "text_zoom_out",
@@ -288,7 +292,7 @@ pub fn panel_hint(id: &str) -> &'static str {
         "disk" => "Проводник. Каталоги и файлы на диске",
         "workspace" => "Пространства. Запиненные каталоги",
         "notes" => "Заметки. Быстрые заметки вне пространства",
-        "history" => "История. Недавно открытые файлы",
+        "history" => "История. Недавно открытые файлы и запросы к AI",
         _ => "",
     }
 }
@@ -387,7 +391,11 @@ mod tests {
         assert_eq!(canonical_panel(PanelSide::Right, "nope", 9), "outline");
         let order = ordered_ids(
             PanelSide::Left,
-            &["notes".to_string(), "notes".to_string(), "missing".to_string()],
+            &[
+                "notes".to_string(),
+                "notes".to_string(),
+                "missing".to_string(),
+            ],
         );
         assert_eq!(order[0], "notes");
         assert_eq!(order.len(), 4);

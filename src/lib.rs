@@ -1,6 +1,7 @@
 pub mod editor;
 pub mod graph;
 pub mod index;
+pub mod inference;
 pub mod kind;
 pub mod markdown;
 pub mod markup;

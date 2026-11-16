@@ -399,6 +399,22 @@ window.verst button.mode-toggle:hover {
     opacity: 1;
     background-color: @theme_bg_color;
 }
+window.verst button.ask-chip {
+    border-radius: 999px;
+    padding: 2px 10px;
+    min-height: 28px;
+    background-color: @theme_bg_color;
+    border: 1px solid alpha(@theme_fg_color, 0.18);
+    box-shadow: 0 1px 2px alpha(black, 0.18), 0 8px 18px alpha(black, 0.14);
+    font-weight: 600;
+}
+window.verst button.ask-chip:hover {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+window.verst label.ask-error {
+    color: #c01c28;
+}
 window.verst grid.tw-md-table {
     margin: 4px 0 8px 0;
     border: 1px solid alpha(@theme_fg_color, 0.18);

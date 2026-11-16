@@ -316,7 +316,9 @@ impl Session {
         self.right_page = seams::panel_index(&self.right_panel).unwrap_or(0);
         self.left_order = seams::ordered_ids(PanelSide::Left, &[]);
         self.right_order = seams::ordered_ids(PanelSide::Right, &self.right_order);
-        self.note_group = crate::notes::note_group(&self.note_group).as_str().to_string();
+        self.note_group = crate::notes::note_group(&self.note_group)
+            .as_str()
+            .to_string();
         if !(NAV_MIN_WIDTH..=NAV_MAX_WIDTH).contains(&self.nav_width) {
             self.nav_width = default_nav_width();
         }

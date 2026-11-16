@@ -1861,7 +1861,7 @@ fn paint_tags(
     text: &str,
     spans: &[MarkSpan],
     cursor_line: i32,
-    tables: &[MdTable],
+    _tables: &[MdTable],
 ) {
     clear_render_tags(buffer);
     let cursor_range = line_byte_range(text, cursor_line);
@@ -1894,14 +1894,6 @@ fn paint_tags(
             }
             MarkKind::Link { .. } => jobs.push((span.start, span.end, TAG_LINK)),
             MarkKind::Image { .. } => {}
-        }
-    }
-    if let Some((start, end)) = cursor_range {
-        let on_table = tables
-            .iter()
-            .any(|table| table.start < end && table.end > start);
-        if !on_table {
-            jobs.push((start, end, TAG_MONO));
         }
     }
     jobs.sort_by_key(|job| job.0);
@@ -2031,11 +2023,6 @@ fn retag_cursor_line(
     for name in TAG_HEADING {
         if let Some(tag) = table.lookup(name) {
             buffer.remove_tag(&tag, &from, &to);
-        }
-    }
-    if on_cursor {
-        if let Some(tag) = table.lookup(TAG_MONO) {
-            buffer.apply_tag(&tag, &from, &to);
         }
     }
     let mut pieces: Vec<(usize, usize, &'static str)> = Vec::new();

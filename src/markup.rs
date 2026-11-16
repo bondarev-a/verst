@@ -10,7 +10,9 @@ pub struct MarkSpan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkKind {
-    Heading { level: u8 },
+    Heading {
+        level: u8,
+    },
     /// Знаки `#` и пробел у заголовка.
     HeadingMark,
     Strong,
@@ -19,8 +21,12 @@ pub enum MarkKind {
     CodeBlock,
     /// Обрамление жирного/курсива/кода (`**`, `*`, `` ` ``).
     Delimiter,
-    Image { dest: String },
-    Link { dest: String },
+    Image {
+        dest: String,
+    },
+    Link {
+        dest: String,
+    },
     /// Обрамление ссылки или картинки, скрываемое вне строки курсора.
     LinkMarkup,
 }

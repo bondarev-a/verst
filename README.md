@@ -1,6 +1,6 @@
 # Verst
 
-Версия 0.5.1.
+Версия 0.6.0.
 
 Локальный редактор текстовых файлов. В меню и на ярлыке программа называется Verst, заголовок окна — Text Workspace. Основной формат — Markdown: слева исходник, справа собранная страница. Остальные текстовые файлы тоже открываются и правятся. Обход сразу по всему диску. Каталог можно запинить как пространство: внутри него работают поиск, входящие ссылки и граф.
 
@@ -13,9 +13,9 @@
 Готовый пакет лежит в [релизах](https://github.com/bondarev-a/verst/releases): файл `verst_<версия>_amd64.deb`. Каждый пуш в `main` выкладывает пакет этой версии. Текст релиза берётся из раздела этой версии в [release_notes.md](./release_notes.md).
 
 ```bash
-wget -O verst_0.5.1_amd64.deb \
-  https://github.com/bondarev-a/verst/releases/download/v0.5.1/verst_0.5.1_amd64.deb
-sudo apt install ./verst_0.5.1_amd64.deb
+wget -O verst_0.6.0_amd64.deb \
+  https://github.com/bondarev-a/verst/releases/download/v0.6.0/verst_0.6.0_amd64.deb
+sudo apt install ./verst_0.6.0_amd64.deb
 ```
 
 После установки программа называется `verst` и появляется в меню.
@@ -32,6 +32,8 @@ sudo apt install ./verst_0.5.1_amd64.deb
 - Файл из проводника или пространства можно перетащить в другое приложение. Файл, брошенный на окно извне, открывается.
 
 Если открытый файл изменили снаружи, программа спрашивает, оставить текст редактора или перечитать диск.
+
+Выделенный фрагмент можно отправить в AI: под выделением появляется чип «Отправить в AI». В запрос уходит только этот фрагмент и вопрос. Ответ заменяет выделение или вставляется ниже него. Что было отправлено и что пришло, лежит в разделе «История», под недавно открытыми файлами.
 
 ## Заметки
 
@@ -70,7 +72,7 @@ sudo apt install ./verst_0.5.1_amd64.deb
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 sudo apt install pkg-config libgtk-4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev
 ./packaging/install_ubuntu.sh --deb
-sudo apt install ./packaging/out/verst_0.5.1_amd64.deb
+sudo apt install ./packaging/out/verst_0.6.0_amd64.deb
 ```
 
 `./packaging/install_ubuntu.sh --deb` только собирает пакет в `packaging/out/` и ничего не ставит. Без флага скрипт ещё копирует программу в `~/.local/bin` и ставит ярлык в меню текущего пользователя. `./packaging/install_ubuntu.sh --system` ставит пакет в систему через apt.
@@ -94,7 +96,7 @@ sudo apt install libgtk-4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev pkg-co
 cargo run --bin text_workspace
 ```
 
-Сессия пишется в `$XDG_CONFIG_HOME/text_workspace/session.json` или в `~/.config/text_workspace/session.json`. Отдельного файла настроек нет: список пинов, открытые файлы, панели и масштаб хранятся в сессии.
+Сессия пишется в `$XDG_CONFIG_HOME/text_workspace/session.json` или в `~/.config/text_workspace/session.json`: список пинов, открытые файлы, панели и масштаб. Доступ к инференсу лежит рядом, в `inference.json`: адрес, модель, ключ или имя переменной окружения. В запрос уходит только фрагмент, который выделили и спросили.
 
 Если процесс сразу завершается с `Failed to fully launch dbus-proxy`, песочница WebKit не смогла вызвать bubblewrap. Для запуска в таком окружении:
 
