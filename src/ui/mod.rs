@@ -149,6 +149,7 @@ use render::RenderState;
 use support::*;
 
 pub(super) const AUTOSAVE_MS: u64 = 800;
+pub(super) const SESSION_SAVE_MS: u64 = 3000;
 pub(super) const PREVIEW_MS: u64 = 150;
 pub(super) const MAX_OPEN_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const TREE_ATTRS: &str =
@@ -168,7 +169,7 @@ struct BufferEntry {
     monitor: Option<gio::FileMonitor>,
 }
 
-struct State {
+pub(super) struct State {
     session: session::Session,
     view_mode: ViewMode,
     buffers: HashMap<PathBuf, BufferEntry>,
@@ -181,6 +182,8 @@ struct State {
     dock_adjust: bool,
     conflict_open: bool,
     autosave: HashMap<PathBuf, glib::SourceId>,
+    session_save: Option<glib::SourceId>,
+    gutter_installed: [bool; 2],
     graph: graph::GraphLayout,
     headings: Vec<markdown::Heading>,
     search_hits: Vec<index::SearchHit>,
@@ -194,6 +197,7 @@ struct State {
     render: RenderState,
     /// Строка, на которую надо встать после открытия файла по ссылке.
     pending_jump: Option<u32>,
+    pending_view_line: Option<u32>,
     /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
     keep_space_tree: bool,
     preview_tick: u64,
@@ -204,6 +208,8 @@ struct Widgets {
     window: gtk4::ApplicationWindow,
     pins_box: gtk4::Box,
     open_mode_dropdown: gtk4::DropDown,
+    bar_zoom_spin: gtk4::SpinButton,
+    bar_text_spin: gtk4::SpinButton,
     workspace_slot: gtk4::Box,
     history_list: gtk4::ListBox,
     notes_host: gtk4::Box,
@@ -275,9 +281,11 @@ struct Widgets {
     mode_button: gtk4::Button,
     status: gtk4::Label,
     css: gtk4::CssProvider,
+    text_css: gtk4::CssProvider,
     empty_buffer: sourceview5::Buffer,
     preferences: Rc<RefCell<Option<gtk4::Window>>>,
     zoom_spin: Rc<RefCell<Option<gtk4::SpinButton>>>,
+    text_spin: Rc<RefCell<Option<gtk4::SpinButton>>>,
     open_mode_settings: Rc<RefCell<Option<gtk4::DropDown>>>,
     word_wrap_switch: Rc<RefCell<Option<gtk4::Switch>>>,
 }
@@ -785,11 +793,27 @@ impl Ctx {
         ));
         let open_mode_label = gtk4::Label::new(Some("Вид"));
         open_mode_label.add_css_class("dim-label");
+        let bar_zoom_spin = zoom_bar_spin(
+            session.zoom_pt,
+            "Масштаб окна. Клавиши Ctrl++ и Ctrl+−.",
+        );
+        let bar_text_spin = zoom_bar_spin(
+            session.text_pt,
+            "Масштаб текста. Клавиши Ctrl+Shift++ и Ctrl+Shift+−.",
+        );
+        let zoom_window_label = gtk4::Label::new(Some("Окно"));
+        zoom_window_label.add_css_class("dim-label");
+        let zoom_text_label = gtk4::Label::new(Some("Текст"));
+        zoom_text_label.add_css_class("dim-label");
         let open_mode_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
         open_mode_box.set_halign(gtk4::Align::End);
         open_mode_box.set_valign(gtk4::Align::Center);
         open_mode_box.append(&open_mode_label);
         open_mode_box.append(&open_mode_dropdown);
+        open_mode_box.append(&zoom_window_label);
+        open_mode_box.append(&bar_zoom_spin);
+        open_mode_box.append(&zoom_text_label);
+        open_mode_box.append(&bar_text_spin);
         pin_box.append(&open_caption);
         pin_box.append(&pins_scroll);
         pin_box.append(&open_mode_box);
@@ -861,6 +885,12 @@ impl Ctx {
             &css,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        let text_css = gtk4::CssProvider::new();
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::prelude::WidgetExt::display(&window),
+            &text_css,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
         let mode_css = gtk4::CssProvider::new();
         mode_css.load_from_string(CHROME_CSS);
         gtk4::style_context_add_provider_for_display(
@@ -868,11 +898,20 @@ impl Ctx {
             &mode_css,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        let table_css = gtk4::CssProvider::new();
+        table_css.load_from_string(TABLE_CELL_CSS);
+        gtk4::style_context_add_provider_for_display(
+            &gtk4::prelude::WidgetExt::display(&window),
+            &table_css,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
 
         let widgets = Widgets {
             window,
             pins_box,
             open_mode_dropdown,
+            bar_zoom_spin,
+            bar_text_spin,
             workspace_slot,
             history_list,
             notes_host,
@@ -944,9 +983,11 @@ impl Ctx {
             mode_button,
             status,
             css,
+            text_css,
             empty_buffer,
             preferences: Rc::new(RefCell::new(None)),
             zoom_spin: Rc::new(RefCell::new(None)),
+            text_spin: Rc::new(RefCell::new(None)),
             open_mode_settings: Rc::new(RefCell::new(None)),
             word_wrap_switch: Rc::new(RefCell::new(None)),
         };
@@ -963,6 +1004,8 @@ impl Ctx {
                 dock_adjust: false,
                 conflict_open: false,
                 autosave: HashMap::new(),
+                session_save: None,
+                gutter_installed: [false, false],
                 graph: graph::GraphLayout {
                     nodes: Vec::new(),
                     edges: Vec::new(),
@@ -977,6 +1020,7 @@ impl Ctx {
                 mode_tick: 0,
                 render: RenderState::default(),
                 pending_jump: None,
+                pending_view_line: None,
                 keep_space_tree: false,
                 preview_tick: 0,
             })),
@@ -1067,6 +1111,8 @@ impl Ctx {
         app.add_action(&word_wrap);
         self.action(app, "zoom_in", |ctx| ctx.bump_zoom(1));
         self.action(app, "zoom_out", |ctx| ctx.bump_zoom(-1));
+        self.action(app, "text_zoom_in", |ctx| ctx.bump_text_zoom(1));
+        self.action(app, "text_zoom_out", |ctx| ctx.bump_text_zoom(-1));
         self.action(app, "search", |ctx| ctx.show_panel("search"));
         self.action(app, "find", |ctx| ctx.show_find());
         self.action(app, "quick_open", |ctx| ctx.quick_open());
@@ -1174,9 +1220,17 @@ impl Ctx {
         self.widgets.nav_path.add_controller(escape);
         let ctx = self.clone();
         self.widgets.window.connect_close_request(move |_| {
-            ctx.save_session();
+            ctx.save_session_now();
             glib::Propagation::Proceed
         });
+        let ctx = self.clone();
+        self.widgets
+            .window
+            .connect_notify_local(Some("is-active"), move |window, _| {
+                if !window.is_active() {
+                    ctx.save_session_now();
+                }
+            });
         let ctx = self.clone();
         self.widgets
             .left_notebook
@@ -1484,6 +1538,15 @@ impl Ctx {
             .search_entry
             .connect_activate(move |_| ctx.run_search());
 
+        self.watch_table_widths();
+        let ctx = self.clone();
+        self.widgets.bar_zoom_spin.connect_value_changed(move |spin| {
+            ctx.set_zoom_pt(spin.value() as i32);
+        });
+        let ctx = self.clone();
+        self.widgets.bar_text_spin.connect_value_changed(move |spin| {
+            ctx.set_text_pt(spin.value() as i32);
+        });
         let ctx = self.clone();
         self.widgets
             .open_mode_dropdown
@@ -2028,7 +2091,8 @@ impl Ctx {
     fn restore(&self) {
         self.state.borrow_mut().loading = true;
         let session = self.state.borrow().session.clone();
-        self.apply_zoom(session.zoom_pt);
+        self.apply_ui_zoom();
+        self.apply_text_zoom();
         self.widgets.second_scroll.set_visible(session.split);
         if let Some(parent) = self.widgets.second_scroll.parent() {
             parent.set_visible(session.split);
@@ -2305,19 +2369,38 @@ impl Ctx {
     fn bump_zoom(&self, delta: i32) {
         let next = zoom::step(self.state.borrow().session.zoom_pt, delta);
         self.state.borrow_mut().session.zoom_pt = next;
-        self.apply_zoom(next);
+        self.apply_ui_zoom();
         self.save_session();
     }
 
-    fn apply_zoom(&self, pt: i32) {
-        self.widgets.css.load_from_string(&zoom::css(pt));
-        self.widgets.preview.set_zoom_level(zoom::webkit_factor(pt));
+    fn bump_text_zoom(&self, delta: i32) {
+        let next = zoom::step(self.state.borrow().session.text_pt, delta);
+        self.state.borrow_mut().session.text_pt = next;
+        self.apply_text_zoom();
+        self.save_session();
+    }
+
+    fn apply_ui_zoom(&self) {
+        let pt = self.state.borrow().session.zoom_pt;
+        self.widgets.css.load_from_string(&zoom::ui_css(pt));
+        assign_spin(&self.widgets.bar_zoom_spin, pt);
         if let Some(spin) = self.widgets.zoom_spin.borrow().clone() {
-            if spin.value() as i32 != pt {
-                spin.set_value(f64::from(pt));
-            }
+            assign_spin(&spin, pt);
         }
         self.set_status("Масштаб окна");
+    }
+
+    fn apply_text_zoom(&self) {
+        let pt = self.state.borrow().session.text_pt;
+        self.widgets.text_css.load_from_string(&zoom::text_css(pt));
+        self.widgets.preview.set_zoom_level(zoom::webkit_factor(pt));
+        self.apply_text_zoom_tags();
+        self.sync_table_grid_widths();
+        assign_spin(&self.widgets.bar_text_spin, pt);
+        if let Some(spin) = self.widgets.text_spin.borrow().clone() {
+            assign_spin(&spin, pt);
+        }
+        self.set_status("Масштаб текста");
     }
 
     fn follow_focus(&self) {
@@ -2416,8 +2499,13 @@ impl Ctx {
 
     fn finish_view_mode(&self, next: ViewMode, anchor: Option<u32>) {
         self.state.borrow_mut().view_mode = next;
+        self.state.borrow_mut().pending_view_line =
+            if next == ViewMode::Preview { None } else { anchor };
         self.remember_focused_mode();
         self.apply_view_mode();
+        if next == ViewMode::Render {
+            self.refresh_render_now();
+        }
         if let Some(line) = anchor {
             self.place_anchor(line, next == ViewMode::Preview);
         }
@@ -2452,11 +2540,18 @@ impl Ctx {
             self.scroll_preview_to_line(line, 0);
             return;
         }
+        let tick = self.state.borrow().mode_tick;
         let ctx = self.clone();
         let mut attempts = 0;
-        glib::idle_add_local(move || {
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            if ctx.state.borrow().mode_tick != tick {
+                return glib::ControlFlow::Break;
+            }
             attempts += 1;
-            if ctx.scroll_editor_to_line(line) || attempts > 12 {
+            if ctx.scroll_editor_to_line(line) || attempts > 40 {
+                if ctx.state.borrow().pending_view_line == Some(line) {
+                    ctx.state.borrow_mut().pending_view_line = None;
+                }
                 glib::ControlFlow::Break
             } else {
                 glib::ControlFlow::Continue
@@ -2589,9 +2684,12 @@ impl Ctx {
                 is_markdown(path)
                     || matches!(kind::shown(path), kind::Shown::Html | kind::Shown::Svg)
             });
-        let editable = mode == ViewMode::Edit || mode == ViewMode::Render;
+        let editable = (mode == ViewMode::Edit || mode == ViewMode::Render)
+            && !self.any_table_cell_focused();
         for view in &self.widgets.views {
             view.set_editable(editable);
+            view.set_cursor_visible(editable);
+            view.set_can_focus(editable || mode == ViewMode::Preview);
         }
         if show_preview {
             self.widgets.content_stack.set_visible_child_name("preview");
@@ -4236,13 +4334,38 @@ impl Ctx {
     }
 
     fn set_status(&self, text: &str) {
-        let zoom = self.state.borrow().session.zoom_pt;
+        let (ui, text_pt) = {
+            let session = &self.state.borrow().session;
+            (session.zoom_pt, session.text_pt)
+        };
         self.widgets
             .status
-            .set_text(&format!("{text}    масштаб {zoom} пт"));
+            .set_text(&format!("{text}    окно {ui} пт, текст {text_pt} пт"));
     }
 
     fn save_session(&self) {
+        if self.state.borrow().loading {
+            return;
+        }
+        if let Some(id) = self.state.borrow_mut().session_save.take() {
+            id.remove();
+        }
+        let ctx = self.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(SESSION_SAVE_MS), move || {
+            ctx.state.borrow_mut().session_save = None;
+            ctx.write_session();
+        });
+        self.state.borrow_mut().session_save = Some(id);
+    }
+
+    fn save_session_now(&self) {
+        if let Some(id) = self.state.borrow_mut().session_save.take() {
+            id.remove();
+        }
+        self.write_session();
+    }
+
+    fn write_session(&self) {
         if self.state.borrow().loading {
             return;
         }

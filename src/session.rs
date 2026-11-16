@@ -75,6 +75,9 @@ pub struct Session {
     pub split: bool,
     #[serde(default = "default_zoom")]
     pub zoom_pt: i32,
+    /// Масштаб редактора и предпросмотра. 0 в файле — взять zoom_pt.
+    #[serde(default)]
+    pub text_pt: i32,
     #[serde(default = "default_theme")]
     pub theme: String,
     /// В каком виде открывается следующий файл.
@@ -205,6 +208,7 @@ impl Default for Session {
             focused_pane: 0,
             split: false,
             zoom_pt: BASE_PT,
+            text_pt: BASE_PT,
             theme: default_theme(),
             open_mode: ViewMode::Edit,
             view_mode: ViewMode::Edit,
@@ -295,6 +299,10 @@ impl Session {
             self.active_pin = if self.pins.is_empty() { None } else { Some(0) };
         }
         self.zoom_pt = zoom::clamp_pt(self.zoom_pt);
+        if self.text_pt < zoom::MIN_PT {
+            self.text_pt = self.zoom_pt;
+        }
+        self.text_pt = zoom::clamp_pt(self.text_pt);
         if self.theme.is_empty() {
             self.theme = default_theme();
         }
@@ -439,6 +447,7 @@ mod tests {
         let session = Session::from_json("{}").unwrap();
         assert!(session.pins.is_empty());
         assert_eq!(session.zoom_pt, BASE_PT);
+        assert_eq!(session.text_pt, BASE_PT);
         assert_eq!(session.theme, "Adwaita");
         assert_eq!(session.open_mode, ViewMode::Edit);
         assert_eq!(session.view_mode, ViewMode::Edit);

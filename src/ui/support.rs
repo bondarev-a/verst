@@ -10,9 +10,62 @@ use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use sourceview5::prelude::ViewExt;
 
-use text_workspace::{graph, kind, markdown, seams};
+use text_workspace::{graph, kind, markdown, seams, zoom};
 
 use super::{Ctx, MAX_OPEN_BYTES, TREE_ATTRS};
+
+pub(super) const TABLE_CELL_CSS: &str = "
+entry.tw-md-cell,
+entry.tw-md-cell text,
+entry.tw-md-cell * {
+    caret-color: transparent;
+    color: @theme_fg_color;
+}
+.tw-md-caret {
+    color: @theme_fg_color;
+    min-width: 2px;
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+entry.tw-md-cell.tw-md-cell-active,
+entry.tw-md-cell.tw-md-cell-active text,
+entry.tw-md-cell:focus,
+entry.tw-md-cell:focus text {
+    caret-color: transparent;
+    color: @theme_fg_color;
+}
+entry.tw-md-cell selection,
+entry.tw-md-cell text selection,
+entry.tw-md-cell * selection {
+    background-color: @theme_selected_bg_color;
+    color: @theme_selected_fg_color;
+}
+";
+
+thread_local! {
+    static TABLE_CELL_PROVIDER: gtk4::CssProvider = {
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_string(TABLE_CELL_CSS);
+        provider
+    };
+}
+
+pub(super) fn bind_table_cell_css(widget: &impl IsA<gtk4::Widget>) {
+    TABLE_CELL_PROVIDER.with(|provider| {
+        bind_provider_tree(widget.upcast_ref(), provider);
+    });
+}
+
+fn bind_provider_tree(widget: &gtk4::Widget, provider: &gtk4::CssProvider) {
+    widget
+        .style_context()
+        .add_provider(provider, gtk4::STYLE_PROVIDER_PRIORITY_USER);
+    let mut child = widget.first_child();
+    while let Some(node) = child {
+        bind_provider_tree(&node, provider);
+        child = node.next_sibling();
+    }
+}
 
 pub(super) const CHROME_CSS: &str = "
 /* Один стиль: радиус 10 у кнопок, 12 у панелей, акцент темы у выбора. */
@@ -351,6 +404,7 @@ window.verst grid.tw-md-table {
     border: 1px solid alpha(@theme_fg_color, 0.18);
     border-radius: 6px;
     background-color: alpha(@theme_bg_color, 0.92);
+    min-width: 28em;
 }
 window.verst entry.tw-md-cell {
     border-radius: 0;
@@ -359,21 +413,39 @@ window.verst entry.tw-md-cell {
     border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
     background-color: @theme_base_color;
     color: @theme_fg_color;
-    caret-color: @theme_fg_color;
+    caret-color: transparent;
     padding: 4px 8px;
-    min-height: 26px;
+    min-height: 28px;
+    min-width: 4.5em;
 }
-window.verst entry.tw-md-cell:focus {
+window.verst textview.tw-editor entry.tw-md-cell,
+window.verst textview.tw-editor entry.tw-md-cell > text {
     background-color: @theme_base_color;
     color: @theme_fg_color;
-    caret-color: @theme_fg_color;
+    caret-color: transparent;
+}
+window.verst .tw-md-caret {
+    color: @theme_fg_color;
+    min-width: 2px;
+    margin-top: 6px;
+    margin-bottom: 6px;
+}
+window.verst entry.tw-md-cell:focus,
+window.verst entry.tw-md-cell.tw-md-cell-active,
+window.verst textview.tw-editor entry.tw-md-cell.tw-md-cell-active > text {
+    background-color: @theme_base_color;
+    color: @theme_fg_color;
+    caret-color: transparent;
     box-shadow: inset 0 0 0 2px @theme_selected_bg_color;
 }
-window.verst entry.tw-md-cell selection {
+window.verst entry.tw-md-cell selection,
+window.verst entry.tw-md-cell > text selection,
+window.verst textview.tw-editor entry.tw-md-cell > text selection {
     background-color: @theme_selected_bg_color;
     color: @theme_selected_fg_color;
 }
-window.verst entry.tw-md-cell-head {
+window.verst entry.tw-md-cell-head,
+window.verst textview.tw-editor entry.tw-md-cell-head > text {
     font-weight: bold;
     background-color: alpha(@theme_fg_color, 0.08);
 }
@@ -482,7 +554,8 @@ window.prompt-dialog button.suggested-action {
 pub(super) fn make_view(buffer: &sourceview5::Buffer) -> sourceview5::View {
     let view = sourceview5::View::with_buffer(buffer);
     view.set_monospace(true);
-    view.set_show_line_numbers(true);
+    view.add_css_class("tw-editor");
+    view.set_show_line_numbers(false);
     view.set_highlight_current_line(true);
     view.set_hexpand(true);
     view.set_vexpand(true);
@@ -1625,6 +1698,25 @@ pub(super) fn dim_row(text: &str) -> gtk4::Label {
     label
 }
 
+pub(super) fn zoom_bar_spin(pt: i32, tooltip: &str) -> gtk4::SpinButton {
+    let spin = gtk4::SpinButton::with_range(f64::from(zoom::MIN_PT), f64::from(zoom::MAX_PT), 1.0);
+    spin.set_digits(0);
+    spin.set_numeric(true);
+    spin.set_wrap(false);
+    spin.set_width_chars(3);
+    spin.set_valign(gtk4::Align::Center);
+    spin.set_value(f64::from(zoom::clamp_pt(pt)));
+    spin.set_tooltip_text(Some(tooltip));
+    spin
+}
+
+pub(super) fn assign_spin(spin: &gtk4::SpinButton, pt: i32) {
+    let pt = zoom::clamp_pt(pt);
+    if spin.value() as i32 != pt {
+        spin.set_value(f64::from(pt));
+    }
+}
+
 pub(super) fn scrolled(child: &impl IsA<gtk4::Widget>) -> gtk4::ScrolledWindow {
     gtk4::ScrolledWindow::builder()
         .child(child)
@@ -1735,8 +1827,9 @@ pub(super) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 pub(super) fn buffer_text_of(buffer: &sourceview5::Buffer) -> String {
     let start = buffer.start_iter();
     let end = buffer.end_iter();
-    // include_hidden_chars: метки режима рендеринга не должны выпадать при сохранении.
-    buffer.text(&start, &end, true).to_string()
+    // slice с hidden: исходник таблицы с тегом invisible не выпадает при сохранении.
+    // U+FFFC — якорь GtkGrid, в файл его писать нельзя.
+    buffer.slice(&start, &end, true).replace('\u{FFFC}', "")
 }
 
 pub(super) fn about_rows(

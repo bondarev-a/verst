@@ -118,6 +118,20 @@ impl Ctx {
     }
 
     pub(super) fn close_file(&self, path: &Path) {
+        self.drop_render_for_path(path);
+        for pane in 0..2 {
+            let shows = self
+                .state
+                .borrow()
+                .session
+                .pane_paths
+                .get(pane)
+                .cloned()
+                .flatten();
+            if shows.as_deref() == Some(path) {
+                self.widgets.views[pane].set_buffer(Some(&self.widgets.empty_buffer));
+            }
+        }
         if self
             .state
             .borrow()
@@ -140,19 +154,6 @@ impl Ctx {
                 id.remove();
             }
             state.buffers.remove(path);
-        }
-        for pane in 0..2 {
-            let shows = self
-                .state
-                .borrow()
-                .session
-                .pane_paths
-                .get(pane)
-                .cloned()
-                .flatten();
-            if shows.is_none() {
-                self.widgets.views[pane].set_buffer(Some(&self.widgets.empty_buffer));
-            }
         }
         self.refresh_open_list();
         self.follow_focus();
@@ -206,6 +207,7 @@ impl Ctx {
                 monitor,
             },
         );
+        self.apply_text_zoom_tags();
         Ok(())
     }
 

@@ -143,20 +143,32 @@ impl Ctx {
     }
 
     pub(super) fn edit_undo(&self) {
+        if self.focused_table_cell().is_some() {
+            self.undo_cell_text();
+            return;
+        }
         let buffer = self.focused_view().buffer();
         if !buffer.can_undo() {
             return;
         }
+        self.suspend_cursor_paint(true);
         buffer.undo();
+        self.suspend_cursor_paint(false);
         self.schedule_render();
     }
 
     pub(super) fn edit_redo(&self) {
+        if self.focused_table_cell().is_some() {
+            self.redo_cell_text();
+            return;
+        }
         let buffer = self.focused_view().buffer();
         if !buffer.can_redo() {
             return;
         }
+        self.suspend_cursor_paint(true);
         buffer.redo();
+        self.suspend_cursor_paint(false);
         self.schedule_render();
     }
 
@@ -174,16 +186,34 @@ impl Ctx {
 
     pub(super) fn editor_anchor_line(&self) -> Option<u32> {
         let view = self.focused_view();
-        let scroll = scrolled_of(&view)?;
+        let buffer = view.buffer();
+        let cursor = {
+            let offset = buffer.cursor_position();
+            let iter = if offset < 0 {
+                buffer.start_iter()
+            } else {
+                buffer.iter_at_offset(offset)
+            };
+            iter.line().max(0) as u32
+        };
+        let Some(scroll) = scrolled_of(&view) else {
+            return Some(cursor);
+        };
         let adj = scroll.vadjustment();
         if adj.page_size() < 1.0 {
-            return None;
+            return Some(cursor);
         }
         let y = (adj.value() + adj.page_size() / 3.0).round() as i32;
         let (iter, _) = gtk4::prelude::TextViewExt::line_at_y(&view, y);
         let line = iter.line().max(0);
-        let next_top = view
-            .buffer()
+        if line == 0 && adj.value() > adj.page_size() {
+            let upper = adj.upper().max(1.0);
+            let ratio = (adj.value() / upper).clamp(0.0, 1.0);
+            let estimate =
+                ((buffer.line_count().max(1) as f64) * ratio).floor() as u32;
+            return Some(estimate.max(1));
+        }
+        let next_top = buffer
             .iter_at_line(line + 1)
             .map(|next| gtk4::prelude::TextViewExt::line_yrange(&view, &next).0);
         Some(anchor_line_at(y, line, next_top).max(0) as u32)
@@ -247,7 +277,7 @@ impl Ctx {
             .and_then(|buffer| buffer.language())
             .map(|language| language.id().to_string());
         let profile = editor::profile_for(language_id.as_deref());
-        view.set_show_line_numbers(true);
+        self.ensure_line_gutter(view);
         view.set_highlight_current_line(true);
         view.set_tab_width(profile.tab_width);
         view.set_insert_spaces_instead_of_tabs(profile.insert_spaces);

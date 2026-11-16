@@ -126,7 +126,8 @@ pub fn parse_tables(source: &str) -> Vec<MdTable> {
             Event::End(TagEnd::Table) => {
                 if let Some(mut build) = current.take() {
                     build.end = range.end;
-                    if let Some(table) = build.finish(source) {
+                    if let Some(mut table) = build.finish(source) {
+                        refine_from_pipes(source, &mut table);
                         tables.push(table);
                     }
                 }
@@ -150,68 +151,148 @@ pub fn replace_cell(source: &str, table: usize, row: usize, col: usize, text: &s
 
 /// Добавить пустую строку данных в конец таблицы.
 pub fn add_row(source: &str, table: usize) -> Option<String> {
-    let tables = parse_tables(source);
-    let table = tables.get(table)?;
-    let line = empty_row(table.column_count());
-    let mut out = String::with_capacity(source.len() + line.len());
-    out.push_str(&source[..table.end]);
-    out.push_str(&line);
-    out.push_str(&source[table.end..]);
-    Some(out)
+    let count = parse_tables(source).get(table)?.rows.len();
+    insert_row_at(source, table, count)
+}
+
+/// `at` — индекс среди строк данных (0 сразу под заголовком).
+pub fn insert_row_at(source: &str, table: usize, at: usize) -> Option<String> {
+    splice_table(source, table, |item| {
+        let cols = item.column_count();
+        let mut rows = row_strings(item);
+        let at = at.min(rows.len());
+        rows.insert(at, vec!["  ".to_string(); cols]);
+        Some(format_md_table(&header_strings(item), &item.alignments, &rows))
+    })
+}
+
+/// `row` — индекс в сетке: 0 заголовок, дальше данные. Заголовок не удаляется.
+pub fn delete_row_at(source: &str, table: usize, row: usize) -> Option<String> {
+    if row == 0 {
+        return None;
+    }
+    splice_table(source, table, |item| {
+        let mut rows = row_strings(item);
+        let index = row - 1;
+        if index >= rows.len() {
+            return None;
+        }
+        rows.remove(index);
+        Some(format_md_table(&header_strings(item), &item.alignments, &rows))
+    })
 }
 
 /// Добавить колонку во все строки, включая строку выравнивания.
 pub fn add_column(source: &str, table: usize) -> Option<String> {
+    let cols = parse_tables(source).get(table)?.column_count();
+    insert_column_at(source, table, cols)
+}
+
+/// Вставить пустую колонку в позиции `col` (текущая уезжает вправо).
+pub fn insert_column_at(source: &str, table: usize, col: usize) -> Option<String> {
+    splice_table(source, table, |item| {
+        let mut header = header_strings(item);
+        let mut rows = row_strings(item);
+        let mut alignments = item.alignments.clone();
+        let at = col.min(header.len());
+        header.insert(at, "  ".to_string());
+        alignments.insert(at, ColAlign::None);
+        for row in &mut rows {
+            let at = at.min(row.len());
+            row.insert(at, "  ".to_string());
+        }
+        Some(format_md_table(&header, &alignments, &rows))
+    })
+}
+
+pub fn delete_column_at(source: &str, table: usize, col: usize) -> Option<String> {
+    splice_table(source, table, |item| {
+        if item.column_count() <= 1 || col >= item.column_count() {
+            return None;
+        }
+        let mut header = header_strings(item);
+        let mut rows = row_strings(item);
+        let mut alignments = item.alignments.clone();
+        header.remove(col);
+        if col < alignments.len() {
+            alignments.remove(col);
+        }
+        for row in &mut rows {
+            if col < row.len() {
+                row.remove(col);
+            }
+        }
+        Some(format_md_table(&header, &alignments, &rows))
+    })
+}
+
+fn splice_table(source: &str, table: usize, edit: impl FnOnce(&MdTable) -> Option<String>) -> Option<String> {
     let tables = parse_tables(source);
-    let table = tables.get(table)?;
-    let rebuilt = format_table_with_extra_column(source, table);
-    let mut out = String::with_capacity(source.len() + 16);
-    out.push_str(&source[..table.start]);
+    let item = tables.get(table)?;
+    let rebuilt = edit(item)?;
+    let mut out = String::with_capacity(source.len() + rebuilt.len());
+    out.push_str(&source[..item.start]);
     out.push_str(&rebuilt);
-    out.push_str(&source[table.end..]);
+    out.push_str(&source[item.end..]);
     Some(out)
 }
 
-fn empty_row(cols: usize) -> String {
-    let mut line = String::new();
-    for _ in 0..cols {
-        line.push_str("|  ");
-    }
-    line.push_str("|\n");
-    line
+fn header_strings(table: &MdTable) -> Vec<String> {
+    table.header.iter().map(|cell| cell.text.clone()).collect()
 }
 
-fn format_table_with_extra_column(source: &str, table: &MdTable) -> String {
-    let mut out = String::new();
-    out.push_str(&row_with_extra(
-        &table.header.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
-        "  ",
-    ));
-    let align_line = source[table.align_start..table.align_end].trim_end_matches('\n');
-    out.push_str(align_line);
-    if !align_line.ends_with('|') {
-        out.push('|');
-    }
-    out.push_str(" --- |\n");
-    for row in &table.rows {
-        out.push_str(&row_with_extra(
-            &row.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
-            "  ",
-        ));
-    }
-    out
+fn row_strings(table: &MdTable) -> Vec<Vec<String>> {
+    table
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|cell| cell.text.clone()).collect())
+        .collect()
 }
 
-fn row_with_extra(cells: &[&str], extra: &str) -> String {
-    let mut line = String::new();
-    line.push('|');
+fn pad_row(mut row: Vec<String>, cols: usize) -> Vec<String> {
+    while row.len() < cols {
+        row.push("  ".to_string());
+    }
+    row.truncate(cols);
+    row
+}
+
+fn write_row(cells: &[String]) -> String {
+    let mut line = String::from("|");
     for cell in cells {
         line.push_str(cell);
         line.push('|');
     }
-    line.push_str(extra);
-    line.push_str("|\n");
+    line.push('\n');
     line
+}
+
+fn write_align(alignments: &[ColAlign]) -> String {
+    let mut line = String::from("|");
+    for align in alignments {
+        line.push_str(match align {
+            ColAlign::None => " --- ",
+            ColAlign::Left => " :--- ",
+            ColAlign::Center => " :---: ",
+            ColAlign::Right => " ---: ",
+        });
+        line.push('|');
+    }
+    line.push('\n');
+    line
+}
+
+fn format_md_table(header: &[String], alignments: &[ColAlign], rows: &[Vec<String>]) -> String {
+    let cols = header.len().max(1);
+    let header = pad_row(header.to_vec(), cols);
+    let mut alignments = alignments.to_vec();
+    alignments.resize(cols, ColAlign::None);
+    let mut out = write_row(&header);
+    out.push_str(&write_align(&alignments));
+    for row in rows {
+        out.push_str(&write_row(&pad_row(row.clone(), cols)));
+    }
+    out
 }
 
 fn map_align(value: pulldown_cmark::Alignment) -> ColAlign {
@@ -261,6 +342,76 @@ impl Building {
     }
 }
 
+fn is_align_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.contains("---") {
+        return false;
+    }
+    trimmed.chars().all(|ch| matches!(ch, '|' | ':' | '-' | ' ' | '\t'))
+}
+
+fn pipe_row_cells(source: &str, line_start: usize, line: &str) -> Vec<TableCell> {
+    let line = line.trim_end_matches('\n').trim_end_matches('\r');
+    if !line.contains('|') {
+        return Vec::new();
+    }
+    let mut cells = Vec::new();
+    let mut i = if line.starts_with('|') { 1 } else { 0 };
+    let mut cell_at = line_start + i;
+    while i < line.len() {
+        let ch = line[i..].chars().next().unwrap();
+        if ch == '|' {
+            cells.push(TableCell {
+                start: cell_at,
+                end: line_start + i,
+                text: source[cell_at..line_start + i].to_string(),
+            });
+            i += 1;
+            cell_at = line_start + i;
+        } else {
+            i += ch.len_utf8();
+        }
+    }
+    cells
+}
+
+/// pulldown-cmark режет колонки по строке `---`. Число `|` в строках может быть больше.
+fn refine_from_pipes(source: &str, table: &mut MdTable) {
+    let end = table.end.min(source.len());
+    let mut pos = table.start.min(end);
+    let mut header = Vec::new();
+    let mut rows = Vec::new();
+    let mut seen_align = false;
+    while pos < end {
+        let rest = &source[pos..end];
+        let width = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
+        let line = &source[pos..pos + width];
+        if is_align_line(line) {
+            seen_align = true;
+            pos += width;
+            continue;
+        }
+        let cells = pipe_row_cells(source, pos, line);
+        if !cells.is_empty() {
+            if !seen_align && header.is_empty() {
+                header = cells;
+            } else {
+                rows.push(cells);
+            }
+        }
+        pos += width;
+    }
+    if header.is_empty() {
+        return;
+    }
+    let cols = header.len();
+    table.header = header;
+    table.rows = rows;
+    if table.alignments.len() < cols {
+        table.alignments.resize(cols, ColAlign::None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +446,17 @@ mod tests {
     fn incomplete_pipe_line_stays_text() {
         let source = "Not a table\n| bad |\n";
         assert!(parse_tables(source).is_empty());
+    }
+
+    #[test]
+    fn extra_header_pipes_keep_all_columns() {
+        let source = "| № | Роль | Фон | Паттерн |\n| --- | --- | --- | --- |\n| 1 | a | b | c |\n";
+        let tables = parse_tables(source);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].column_count(), 4);
+        assert_eq!(tables[0].header[3].text.trim(), "Паттерн");
+        assert_eq!(tables[0].rows[0][3].text.trim(), "c");
+        assert_eq!(&source[tables[0].start..tables[0].end], source);
     }
 
     #[test]
@@ -334,6 +496,38 @@ mod tests {
         assert_eq!(tables[0].rows[0].len(), 3);
         let align = &next[tables[0].align_start..tables[0].align_end];
         assert!(align.matches("---").count() >= 3);
+    }
+
+    #[test]
+    fn insert_row_and_column_around_cell() {
+        let source = sample();
+        let above = insert_row_at(source, 0, 0).unwrap();
+        let tables = parse_tables(&above);
+        assert_eq!(tables[0].rows.len(), 3);
+        assert_eq!(tables[0].rows[0][0].text.trim(), "");
+        assert_eq!(tables[0].rows[1][0].text.trim(), "apples");
+        let left = insert_column_at(source, 0, 0).unwrap();
+        let tables = parse_tables(&left);
+        assert_eq!(tables[0].column_count(), 3);
+        assert_eq!(tables[0].header[1].text.trim(), "Name");
+        let right = insert_column_at(source, 0, 1).unwrap();
+        let tables = parse_tables(&right);
+        assert_eq!(tables[0].header[1].text.trim(), "");
+        assert_eq!(tables[0].header[2].text.trim(), "Qty");
+    }
+
+    #[test]
+    fn delete_row_and_column_keep_header() {
+        let source = sample();
+        assert!(delete_row_at(source, 0, 0).is_none());
+        let gone = delete_row_at(source, 0, 1).unwrap();
+        let tables = parse_tables(&gone);
+        assert_eq!(tables[0].rows.len(), 1);
+        assert_eq!(tables[0].rows[0][0].text.trim(), "**tea**");
+        let one_col = delete_column_at(source, 0, 1).unwrap();
+        let tables = parse_tables(&one_col);
+        assert_eq!(tables[0].column_count(), 1);
+        assert!(delete_column_at(&one_col, 0, 0).is_none());
     }
 
     #[test]

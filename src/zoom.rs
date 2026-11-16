@@ -14,13 +14,24 @@ pub fn webkit_factor(pt: i32) -> f64 {
     f64::from(clamp_pt(pt)) / f64::from(BASE_PT)
 }
 
-pub fn css(pt: i32) -> String {
+/// Масштаб окна: дерево, меню, кнопки. Не трогает редактор — иначе GTK
+/// падает на скрытых строках таблицы при смене font-size у textview.
+pub fn ui_css(pt: i32) -> String {
     let pt = clamp_pt(pt);
     format!(
-        "window, popover, menu, label, button, entry, text, textview, listview {{
+        "window.verst, window.verst popover, window.verst menu,
+         window.verst label, window.verst button, window.verst entry,
+         window.verst listview, window.verst columnview {{
             font-size: {pt}pt;
-        }}
-        textview, textview text {{
+        }}"
+    )
+}
+
+pub fn text_css(pt: i32) -> String {
+    let pt = clamp_pt(pt);
+    format!(
+        "entry.tw-md-cell, entry.tw-md-cell > text,
+         gutterrenderertext.tw-line-numbers {{
             font-family: monospace;
             font-size: {pt}pt;
         }}"
@@ -41,5 +52,15 @@ mod tests {
     #[test]
     fn webkit_factor_is_one_at_base() {
         assert!((webkit_factor(BASE_PT) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ui_css_does_not_restyle_textview() {
+        let css = ui_css(14);
+        assert!(css.contains("14pt"));
+        assert!(!css.contains("textview"));
+        let text = text_css(16);
+        assert!(text.contains("16pt"));
+        assert!(!text.contains("textview"));
     }
 }

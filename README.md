@@ -1,6 +1,6 @@
 # Verst
 
-Версия 0.5.0.
+Версия 0.5.1.
 
 Локальный редактор текстовых файлов. В меню и на ярлыке программа называется Verst, заголовок окна — Text Workspace. Основной формат — Markdown: слева исходник, справа собранная страница. Остальные текстовые файлы тоже открываются и правятся. Обход сразу по всему диску. Каталог можно запинить как пространство: внутри него работают поиск, входящие ссылки и граф.
 
@@ -13,9 +13,9 @@
 Готовый пакет лежит в [релизах](https://github.com/bondarev-a/verst/releases): файл `verst_<версия>_amd64.deb`. Каждый пуш в `main` выкладывает пакет этой версии. Текст релиза берётся из раздела этой версии в [release_notes.md](./release_notes.md).
 
 ```bash
-wget -O verst_0.5.0_amd64.deb \
-  https://github.com/bondarev-a/verst/releases/download/v0.5.0/verst_0.5.0_amd64.deb
-sudo apt install ./verst_0.5.0_amd64.deb
+wget -O verst_0.5.1_amd64.deb \
+  https://github.com/bondarev-a/verst/releases/download/v0.5.1/verst_0.5.1_amd64.deb
+sudo apt install ./verst_0.5.1_amd64.deb
 ```
 
 После установки программа называется `verst` и появляется в меню.
@@ -53,7 +53,7 @@ sudo apt install ./verst_0.5.0_amd64.deb
 
 Пространства переключаются `Ctrl+1`…`Ctrl+9`, а также `Ctrl+Tab` и `Ctrl+Shift+Tab`. Панель редактора можно разделить. Поиск по содержимому, входящие ссылки и граф считаются внутри активного пина. Исходящие ссылки открытого файла берутся из его текста и ведут в тот запиненный каталог, где лежит файл.
 
-Масштаб окна: `Ctrl++` и `Ctrl+-`. На клавиатуре, где плюс набирается через Shift, срабатывает и `Ctrl+=`. Назад и вперёд по открытым местам — `Alt+Left` и `Alt+Right`. Найти в файле — `Ctrl+F`.
+Масштаб окна: `Ctrl++` и `Ctrl+-`. На клавиатуре, где плюс набирается через Shift, срабатывает и `Ctrl+=`. Масштаб текста в редакторе и предпросмотре — `Ctrl+Shift++` и `Ctrl+Shift+-`, отдельно от окна. Назад и вперёд по открытым местам — `Alt+Left` и `Alt+Right`. Найти в файле — `Ctrl+F`.
 
 ## Стек
 
@@ -70,7 +70,7 @@ sudo apt install ./verst_0.5.0_amd64.deb
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 sudo apt install pkg-config libgtk-4-dev libgtksourceview-5-dev libwebkitgtk-6.0-dev
 ./packaging/install_ubuntu.sh --deb
-sudo apt install ./packaging/out/verst_0.5.0_amd64.deb
+sudo apt install ./packaging/out/verst_0.5.1_amd64.deb
 ```
 
 `./packaging/install_ubuntu.sh --deb` только собирает пакет в `packaging/out/` и ничего не ставит. Без флага скрипт ещё копирует программу в `~/.local/bin` и ставит ярлык в меню текущего пользователя. `./packaging/install_ubuntu.sh --system` ставит пакет в систему через apt.

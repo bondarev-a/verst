@@ -152,15 +152,27 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "zoom_in",
-        title: "Увеличить",
+        title: "Увеличить окно",
         section: "Вид",
         accels: &["<Control>plus", "<Control>equal", "<Control>KP_Add"],
     },
     CommandSpec {
         id: "zoom_out",
-        title: "Уменьшить",
+        title: "Уменьшить окно",
         section: "Вид",
         accels: &["<Control>minus", "<Control>KP_Subtract"],
+    },
+    CommandSpec {
+        id: "text_zoom_in",
+        title: "Увеличить текст",
+        section: "Вид",
+        accels: &["<Control><Shift>plus", "<Control><Shift>equal", "<Control><Shift>KP_Add"],
+    },
+    CommandSpec {
+        id: "text_zoom_out",
+        title: "Уменьшить текст",
+        section: "Вид",
+        accels: &["<Control><Shift>minus", "<Control><Shift>KP_Subtract"],
     },
     CommandSpec {
         id: "search",
@@ -352,6 +364,16 @@ mod tests {
         assert!(zoom_in.accels.iter().any(|a| a.contains("plus")));
         let zoom_out = commands().iter().find(|c| c.id == "zoom_out").unwrap();
         assert!(zoom_out.accels.iter().any(|a| a.contains("minus")));
+        let text_zoom_in = commands().iter().find(|c| c.id == "text_zoom_in").unwrap();
+        assert!(text_zoom_in
+            .accels
+            .iter()
+            .any(|a| a.contains("<Control><Shift>plus")));
+        let text_zoom_out = commands().iter().find(|c| c.id == "text_zoom_out").unwrap();
+        assert!(text_zoom_out
+            .accels
+            .iter()
+            .any(|a| a.contains("<Control><Shift>minus")));
         assert_eq!(panel_index("notes"), Some(2));
         assert_eq!(panel_index("history"), Some(3));
         assert_eq!(panel_id(PanelSide::Left, 0), Some("disk"));

@@ -114,18 +114,35 @@ impl Ctx {
         zoom_spin.set_numeric(true);
         zoom_spin.set_width_chars(4);
         zoom_spin.set_value(f64::from(session.zoom_pt));
-        zoom_spin.set_tooltip_text(Some("Размер текста. Те же клавиши Ctrl++ и Ctrl+−."));
+        zoom_spin.set_tooltip_text(Some("Интерфейс: дерево, меню, кнопки. Клавиши Ctrl++ и Ctrl+−."));
         let ctx = self.clone();
         zoom_spin.connect_value_changed(move |spin| {
             ctx.set_zoom_pt(spin.value() as i32);
         });
         *self.widgets.zoom_spin.borrow_mut() = Some(zoom_spin.clone());
-        box_.append(&labeled("Масштаб, пт", &zoom_spin));
+        box_.append(&labeled("Масштаб окна, пт", &zoom_spin));
+
+        let text_spin =
+            gtk4::SpinButton::with_range(f64::from(zoom::MIN_PT), f64::from(zoom::MAX_PT), 1.0);
+        text_spin.set_digits(0);
+        text_spin.set_numeric(true);
+        text_spin.set_width_chars(4);
+        text_spin.set_value(f64::from(session.text_pt));
+        text_spin.set_tooltip_text(Some(
+            "Редактор и предпросмотр. Клавиши Ctrl+Shift++ и Ctrl+Shift+−.",
+        ));
+        let ctx = self.clone();
+        text_spin.connect_value_changed(move |spin| {
+            ctx.set_text_pt(spin.value() as i32);
+        });
+        *self.widgets.text_spin.borrow_mut() = Some(text_spin.clone());
+        box_.append(&labeled("Масштаб текста, пт", &text_spin));
 
         let sample_view = sourceview5::View::with_buffer(&sample);
         sample_view.set_editable(false);
         sample_view.set_cursor_visible(false);
         sample_view.set_monospace(true);
+        sample_view.add_css_class("tw-editor");
         sample_view.set_show_line_numbers(true);
         sample_view.set_left_margin(8);
         sample_view.set_right_margin(8);
@@ -141,11 +158,13 @@ impl Ctx {
         window.set_child(Some(&columns));
         let preferences = self.widgets.preferences.clone();
         let zoom_slot = self.widgets.zoom_spin.clone();
+        let text_slot = self.widgets.text_spin.clone();
         let open_mode_slot = self.widgets.open_mode_settings.clone();
         let wrap_slot = self.widgets.word_wrap_switch.clone();
         window.connect_close_request(move |_| {
             preferences.borrow_mut().take();
             zoom_slot.borrow_mut().take();
+            text_slot.borrow_mut().take();
             open_mode_slot.borrow_mut().take();
             wrap_slot.borrow_mut().take();
             gtk4::glib::Propagation::Proceed
@@ -192,7 +211,17 @@ impl Ctx {
             return;
         }
         self.state.borrow_mut().session.zoom_pt = pt;
-        self.apply_zoom(pt);
+        self.apply_ui_zoom();
+        self.save_session();
+    }
+
+    pub(super) fn set_text_pt(&self, pt: i32) {
+        let pt = zoom::clamp_pt(pt);
+        if self.state.borrow().session.text_pt == pt {
+            return;
+        }
+        self.state.borrow_mut().session.text_pt = pt;
+        self.apply_text_zoom();
         self.save_session();
     }
 

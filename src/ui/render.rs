@@ -10,9 +10,31 @@ use text_workspace::markup::{mark_spans, MarkKind, MarkSpan};
 use text_workspace::session::ViewMode;
 use text_workspace::tables::{self, ColAlign, MdTable};
 use text_workspace::markdown;
+use text_workspace::zoom;
 
-use super::support::{buffer_text_of, is_markdown};
-use super::{Ctx, PREVIEW_MS};
+use super::support::{
+    bind_table_cell_css, buffer_text_of, is_markdown, menu_row, scrolled_of,
+};
+use super::{Ctx, State, PREVIEW_MS};
+
+fn display_line_number_of(state: &State, buffer_line: i32) -> Option<i32> {
+    if buffer_line < 0 {
+        return None;
+    }
+    if state.view_mode != ViewMode::Render {
+        return Some(buffer_line + 1);
+    }
+    let mut hidden = 0i32;
+    for table in &state.render.tables {
+        if buffer_line > table.start_line && buffer_line < table.end_line {
+            return None;
+        }
+        if buffer_line >= table.end_line {
+            hidden += (table.end_line - table.start_line - 1).max(0);
+        }
+    }
+    Some(buffer_line + 1 - hidden)
+}
 
 const TAG_HEADING: &[&str] = &[
     "tw-h1", "tw-h2", "tw-h3", "tw-h4", "tw-h5", "tw-h6",
@@ -23,6 +45,7 @@ const TAG_CODE: &str = "tw-code";
 const TAG_CODEBLOCK: &str = "tw-codeblock";
 const TAG_HIDE: &str = "tw-hide";
 const TAG_TABLE: &str = "tw-table";
+const TAG_ZOOM: &str = "tw-zoom";
 const TAG_LINK: &str = "tw-link";
 const TAG_MONO: &str = "tw-mono";
 
@@ -41,9 +64,20 @@ pub(super) struct RenderState {
     painted: bool,
     table_bodies: Vec<String>,
     image_keys: Vec<String>,
+    pending_table_focus: Option<(usize, usize, usize)>,
+    parking: bool,
+    cell_caret: i32,
+    cell_anchor: i32,
+    cell_typing: bool,
+    cell_undo: Vec<(String, i32, i32)>,
+    cell_redo: Vec<(String, i32, i32)>,
+    /// Пока буфер откатывается, курсор не перекрашивает строки старыми смещениями.
+    cursor_suspend: bool,
 }
 
+#[derive(Clone)]
 struct LiveTable {
+    path: PathBuf,
     index: usize,
     start: usize,
     end: usize,
@@ -54,7 +88,9 @@ struct LiveTable {
     focus_cell: Rc<RefCell<Option<(usize, usize)>>>,
 }
 
+#[derive(Clone)]
 struct LiveImage {
+    path: PathBuf,
     anchor: gtk4::TextChildAnchor,
     widgets: [gtk4::Widget; 2],
 }
@@ -69,6 +105,9 @@ impl Ctx {
             click.connect_pressed(move |gesture, _, x, y| {
                 if ctx.state.borrow().view_mode != ViewMode::Render {
                     return;
+                }
+                if !pick_is_table_cell(&view_click, x, y) {
+                    ctx.deactivate_table_cells();
                 }
                 let Some(event) = gesture.current_event() else {
                     return;
@@ -100,6 +139,27 @@ impl Ctx {
                 }
             });
             view.add_controller(click);
+            let keys = gtk4::EventControllerKey::new();
+            keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            let ctx = self.clone();
+            keys.connect_key_pressed(move |_, keyval, _, modifier| {
+                if ctx.state.borrow().view_mode != ViewMode::Render {
+                    return glib::Propagation::Proceed;
+                }
+                ctx.handle_table_key(keyval, modifier)
+            });
+            view.add_controller(keys);
+            let bubble = gtk4::EventControllerKey::new();
+            bubble.set_propagation_phase(gtk4::PropagationPhase::Bubble);
+            let ctx = self.clone();
+            bubble.connect_key_pressed(move |_, _, _, _| {
+                if ctx.any_table_cell_focused() {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            view.add_controller(bubble);
         }
     }
 
@@ -154,20 +214,22 @@ impl Ctx {
         };
         self.ensure_render_tags(&buffer);
         self.ensure_cursor_hook(&buffer);
-        let text = buffer_text_of(&buffer);
         let cursor_line = buffer.iter_at_mark(&buffer.get_insert()).line();
-        let cell_focus = self.any_table_cell_focused();
-        if cell_focus {
-            let spans = mark_spans(&text);
-            paint_tags(&buffer, &text, &spans, cursor_line);
-            let mut state = self.state.borrow_mut();
-            state.render.line_starts = line_starts_of(&text);
-            state.render.text_len = text.len();
-            state.render.spans = spans;
-            state.render.cursor_line = Some(cursor_line);
+        if self.any_table_cell_focused() {
+            self.recover_table_cover(&buffer);
             return;
         }
         self.rebuild_widgets(&buffer, &path, cursor_line);
+        self.restore_pending_view_line();
+    }
+
+    fn restore_pending_view_line(&self) {
+        let Some(line) = self.state.borrow().pending_view_line else {
+            return;
+        };
+        if self.scroll_editor_to_line(line) {
+            self.state.borrow_mut().pending_view_line = None;
+        }
     }
 
     pub(super) fn clear_render_layer(&self) {
@@ -184,32 +246,239 @@ impl Ctx {
                 std::mem::take(&mut state.render.images),
             )
         };
-        for table in &tables {
+        self.drop_embeds(&tables, &images);
+    }
+
+    pub(super) fn drop_render_for_path(&self, path: &Path) {
+        if self.focused_table_cell().is_some() {
+            self.deactivate_table_cells();
+        }
+        let (tables, images) = {
+            let mut state = self.state.borrow_mut();
+            let tables = std::mem::take(&mut state.render.tables);
+            let images = std::mem::take(&mut state.render.images);
+            let keep_tables: Vec<_> = tables
+                .iter()
+                .filter(|table| table.path != path)
+                .cloned()
+                .collect();
+            let keep_images: Vec<_> = images
+                .iter()
+                .filter(|image| image.path != path)
+                .cloned()
+                .collect();
+            let drop_tables: Vec<_> = tables
+                .into_iter()
+                .filter(|table| table.path == path)
+                .collect();
+            let drop_images: Vec<_> = images
+                .into_iter()
+                .filter(|image| image.path == path)
+                .collect();
+            if keep_tables.is_empty() && keep_images.is_empty() {
+                state.render.spans.clear();
+                state.render.line_starts.clear();
+                state.render.table_bodies.clear();
+                state.render.image_keys.clear();
+                state.render.painted = false;
+                state.render.cursor_line = None;
+            }
+            state.render.tables = keep_tables;
+            state.render.images = keep_images;
+            (drop_tables, drop_images)
+        };
+        self.drop_embeds(&tables, &images);
+    }
+
+    fn drop_embeds(&self, tables: &[LiveTable], images: &[LiveImage]) {
+        for table in tables {
             for grid in &table.grids {
                 detach_child(grid);
             }
         }
-        for image in &images {
+        for image in images {
             for widget in &image.widgets {
                 detach_child(widget);
             }
         }
-        let buffers: Vec<sourceview5::Buffer> = self
+        let mut paths: Vec<PathBuf> = tables.iter().map(|table| table.path.clone()).collect();
+        paths.extend(images.iter().map(|image| image.path.clone()));
+        paths.sort();
+        paths.dedup();
+        for path in paths {
+            let Some(buffer) = self
+                .state
+                .borrow()
+                .buffers
+                .get(&path)
+                .map(|entry| entry.buffer.clone())
+            else {
+                continue;
+            };
+            self.state.borrow_mut().render.writing = true;
+            remove_path_anchors(
+                &buffer.clone().upcast::<gtk4::TextBuffer>(),
+                tables,
+                images,
+                &path,
+            );
+            self.state.borrow_mut().render.writing = false;
+            clear_render_tags(&buffer);
+        }
+    }
+
+    pub(super) fn ensure_line_gutter(&self, view: &sourceview5::View) {
+        let pane = if std::ptr::eq(view, &self.widgets.views[0]) {
+            0
+        } else {
+            1
+        };
+        if self.state.borrow().gutter_installed[pane] {
+            return;
+        }
+        let gutter = sourceview5::prelude::ViewExt::gutter(view, gtk4::TextWindowType::Left);
+        let renderer = sourceview5::GutterRendererText::new();
+        gtk4::prelude::WidgetExt::set_widget_name(&renderer, "tw-line-numbers");
+        gtk4::prelude::WidgetExt::set_width_request(&renderer, 48);
+        sourceview5::prelude::GutterRendererExt::set_xalign(&renderer, 1.0);
+        sourceview5::prelude::GutterRendererExt::set_xpad(&renderer, 8);
+        sourceview5::prelude::GutterRendererTextExt::set_text(&renderer, "8888");
+        let ctx = self.clone();
+        sourceview5::prelude::GutterRendererExt::connect_query_data(
+            &renderer,
+            move |renderer, _, line| {
+                let text = match ctx.state.try_borrow() {
+                    Ok(state) => display_line_number_of(&state, line as i32)
+                        .map(|n| n.to_string())
+                        .unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
+                sourceview5::prelude::GutterRendererTextExt::set_text(renderer, &text);
+            },
+        );
+        sourceview5::prelude::ViewExt::set_show_line_numbers(view, false);
+        if gutter.insert(&renderer, 0) {
+            self.state.borrow_mut().gutter_installed[pane] = true;
+        }
+    }
+
+    pub(super) fn watch_table_widths(&self) {
+        for pane in 0..2 {
+            let ctx = self.clone();
+            self.widgets.views[pane].connect_realize(move |view| {
+                ctx.sync_table_grid_widths();
+                if let Some(scroll) = scrolled_of(view) {
+                    let ctx = ctx.clone();
+                    scroll.hadjustment().connect_notify_local(Some("page-size"), move |_, _| {
+                        ctx.sync_table_grid_widths();
+                    });
+                }
+            });
+        }
+        let ctx = self.clone();
+        self.widgets
+            .editor_paned
+            .connect_notify_local(Some("position"), move |_, _| {
+                ctx.sync_table_grid_widths();
+            });
+        let ctx = self.clone();
+        self.widgets
+            .main_paned
+            .connect_notify_local(Some("position"), move |_, _| {
+                ctx.sync_table_grid_widths();
+            });
+        let ctx = self.clone();
+        self.widgets
+            .right_paned
+            .connect_notify_local(Some("position"), move |_, _| {
+                ctx.sync_table_grid_widths();
+            });
+    }
+
+    pub(super) fn sync_table_grid_widths(&self) {
+        let tables: Vec<[gtk4::Grid; 2]> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| table.grids.clone())
+            .collect();
+        for grids in tables {
+            for (pane, grid) in grids.iter().enumerate() {
+                size_table_grid(grid, &self.widgets.views[pane]);
+            }
+        }
+    }
+
+    pub(super) fn apply_text_zoom_tags(&self) {
+        let pt = self.state.borrow().session.text_pt;
+        let scale = zoom::webkit_factor(pt);
+        let buffers: Vec<_> = self
             .state
             .borrow()
             .buffers
             .values()
             .map(|entry| entry.buffer.clone())
             .collect();
-        for buffer in &buffers {
-            self.state.borrow_mut().render.writing = true;
-            remove_anchors(
-                &buffer.clone().upcast::<gtk4::TextBuffer>(),
-                &tables,
-                &images,
-            );
-            self.state.borrow_mut().render.writing = false;
-            clear_render_tags(buffer);
+        for buffer in buffers.iter().chain(std::iter::once(&self.widgets.empty_buffer)) {
+            ensure_tag(&buffer.tag_table(), TAG_ZOOM, |tag| {
+                tag.set_scale(scale);
+            });
+            let start = buffer.start_iter();
+            let end = buffer.end_iter();
+            if let Some(tag) = buffer.tag_table().lookup(TAG_ZOOM) {
+                buffer.apply_tag(&tag, &start, &end);
+            }
+        }
+        if self.state.borrow().view_mode != ViewMode::Render {
+            return;
+        }
+        let Some(path) = self.focused_path() else {
+            return;
+        };
+        let Some(buffer) = self
+            .state
+            .borrow()
+            .buffers
+            .get(&path)
+            .map(|entry| entry.buffer.clone())
+        else {
+            return;
+        };
+        let text = buffer_text_of(&buffer);
+        let tables: Vec<(usize, usize)> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| (table.start, table.end))
+            .collect();
+        let table_anchors: Vec<_> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| table.anchor.clone())
+            .collect();
+        let image_anchors: Vec<_> = self
+            .state
+            .borrow()
+            .render
+            .images
+            .iter()
+            .map(|image| image.anchor.clone())
+            .collect();
+        for (start, end) in tables {
+            cover_table_source(&buffer, &text, start, end);
+        }
+        for anchor in &table_anchors {
+            lift_anchor_scale(&buffer, anchor);
+        }
+        for anchor in &image_anchors {
+            lift_anchor_scale(&buffer, anchor);
         }
     }
 
@@ -223,48 +492,17 @@ impl Ctx {
         if mode == ViewMode::Render && markdown {
             self.schedule_render();
         } else {
+            self.deactivate_table_cells();
             self.clear_render_layer();
         }
     }
 
     pub(super) fn add_table_column(&self) {
-        if self.state.borrow().view_mode != ViewMode::Render {
-            self.set_status("Колонка таблицы добавляется в режиме рендеринга");
-            return;
-        }
-        let Some(path) = self.focused_path() else {
-            return;
-        };
-        if !is_markdown(&path) {
-            return;
-        }
-        let index = self.focused_table_index().or_else(|| {
-            self.state
-                .borrow()
-                .render
-                .tables
-                .first()
-                .map(|table| table.index)
-        });
-        let Some(index) = index else {
+        let Some((path, table, row, col)) = self.table_edit_target() else {
             self.set_status("Нет таблицы под курсором");
             return;
         };
-        let Some(buffer) = self
-            .state
-            .borrow()
-            .buffers
-            .get(&path)
-            .map(|entry| entry.buffer.clone())
-        else {
-            return;
-        };
-        let text = buffer_text_of(&buffer);
-        let Some(next) = tables::add_column(&text, index) else {
-            return;
-        };
-        self.replace_all_text(&buffer, &next);
-        self.refresh_render_now();
+        self.table_insert_column(path, table, row, col, true);
     }
 
     pub(super) fn commit_table_cell(
@@ -308,21 +546,186 @@ impl Ctx {
     }
 
     pub(super) fn table_add_row(&self, path: PathBuf, table: usize) {
+        let row = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .find(|item| item.index == table)
+            .and_then(|item| item.focus_cell.borrow().map(|(row, _)| row))
+            .unwrap_or(0);
+        self.table_insert_row(path, table, row, 0, true);
+    }
+
+    fn table_edit_target(&self) -> Option<(PathBuf, usize, usize, usize)> {
+        if self.state.borrow().view_mode != ViewMode::Render {
+            self.set_status("Таблицу правят в режиме рендеринга");
+            return None;
+        }
+        let path = self.focused_path()?;
+        if !is_markdown(&path) {
+            return None;
+        }
+        let (table, row, col) = self.focused_table_cell().or_else(|| {
+            self.state
+                .borrow()
+                .render
+                .tables
+                .first()
+                .map(|item| (item.index, 0, 0))
+        })?;
+        Some((path, table, row, col))
+    }
+
+    pub(super) fn focused_table_cell(&self) -> Option<(usize, usize, usize)> {
+        let state = self.state.borrow();
+        state.render.tables.iter().find_map(|item| {
+            item.focus_cell
+                .borrow()
+                .map(|(row, col)| (item.index, row, col))
+        })
+    }
+
+    fn table_insert_row(&self, path: PathBuf, table: usize, row: usize, col: usize, below: bool) {
+        let at = if below { row } else { row.saturating_sub(1) };
+        let focus_row = if below { row + 1 } else { row.max(1) };
+        self.apply_table_edit(&path, table, (table, focus_row, col), |text| {
+            tables::insert_row_at(text, table, at)
+        });
+    }
+
+    fn table_delete_row(&self, path: PathBuf, table: usize, row: usize, col: usize) {
+        if row == 0 {
+            self.set_status("Заголовок таблицы не удаляется");
+            return;
+        }
+        self.apply_table_edit(&path, table, (table, row - 1, col), |text| {
+            tables::delete_row_at(text, table, row)
+        });
+    }
+
+    fn table_insert_column(
+        &self,
+        path: PathBuf,
+        table: usize,
+        row: usize,
+        col: usize,
+        right: bool,
+    ) {
+        let at = if right { col + 1 } else { col };
+        let focus_col = at;
+        self.apply_table_edit(&path, table, (table, row, focus_col), |text| {
+            tables::insert_column_at(text, table, at)
+        });
+    }
+
+    fn table_delete_column(&self, path: PathBuf, table: usize, row: usize, col: usize) {
+        self.apply_table_edit(&path, table, (table, row, col.saturating_sub(1)), |text| {
+            tables::delete_column_at(text, table, col)
+        });
+    }
+
+    fn apply_table_edit(
+        &self,
+        path: &Path,
+        _table: usize,
+        focus: (usize, usize, usize),
+        edit: impl FnOnce(&str) -> Option<String>,
+    ) {
         let Some(buffer) = self
             .state
             .borrow()
             .buffers
-            .get(&path)
+            .get(path)
             .map(|entry| entry.buffer.clone())
         else {
             return;
         };
         let text = buffer_text_of(&buffer);
-        let Some(next) = tables::add_row(&text, table) else {
+        let Some(next) = edit(&text) else {
+            self.set_status("Так таблицу изменить нельзя");
             return;
         };
+        self.state.borrow_mut().render.pending_table_focus = Some(focus);
         self.replace_all_text(&buffer, &next);
         self.refresh_render_now();
+    }
+
+    fn restore_table_focus(&self) {
+        let Some((table, row, col)) = self.state.borrow_mut().render.pending_table_focus.take()
+        else {
+            return;
+        };
+        let ctx = self.clone();
+        glib::idle_add_local_once(move || {
+            ctx.activate_table_cell(table, row, col);
+        });
+    }
+
+    fn show_table_menu(
+        &self,
+        anchor: &gtk4::Widget,
+        path: PathBuf,
+        table: usize,
+        row: usize,
+        col: usize,
+    ) {
+        let popover = gtk4::Popover::new();
+        popover.add_css_class("context-menu");
+        popover.set_parent(anchor);
+        popover.set_has_arrow(true);
+        let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let add = |title: &str, on: Box<dyn Fn()>| {
+            let row_btn = menu_row(title);
+            let popover_close = popover.clone();
+            row_btn.connect_clicked(move |_| {
+                on();
+                popover_close.popdown();
+            });
+            menu.append(&row_btn);
+        };
+        let ctx = self.clone();
+        let path_c = path.clone();
+        add(
+            "Строка выше",
+            Box::new(move || ctx.table_insert_row(path_c.clone(), table, row, col, false)),
+        );
+        let ctx = self.clone();
+        let path_c = path.clone();
+        add(
+            "Строка ниже",
+            Box::new(move || ctx.table_insert_row(path_c.clone(), table, row, col, true)),
+        );
+        let ctx = self.clone();
+        let path_c = path.clone();
+        add(
+            "Удалить строку",
+            Box::new(move || ctx.table_delete_row(path_c.clone(), table, row, col)),
+        );
+        let ctx = self.clone();
+        let path_c = path.clone();
+        add(
+            "Столбец слева",
+            Box::new(move || ctx.table_insert_column(path_c.clone(), table, row, col, false)),
+        );
+        let ctx = self.clone();
+        let path_c = path.clone();
+        add(
+            "Столбец справа",
+            Box::new(move || ctx.table_insert_column(path_c.clone(), table, row, col, true)),
+        );
+        let ctx = self.clone();
+        let path_c = path;
+        add(
+            "Удалить столбец",
+            Box::new(move || ctx.table_delete_column(path_c.clone(), table, row, col)),
+        );
+        popover.set_child(Some(&menu));
+        popover.connect_closed(|popover| {
+            popover.unparent();
+        });
+        popover.popup();
     }
 
     fn sync_table_cell_entries(&self, table: usize, row: usize, col: usize, value: &str) {
@@ -333,7 +736,8 @@ impl Ctx {
         for grid in &live.grids {
             if let Some(entry) = grid
                 .child_at(col as i32, row as i32)
-                .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
+                .as_ref()
+                .and_then(cell_entry_of)
             {
                 if entry.text() != value {
                     entry.set_text(value);
@@ -350,22 +754,501 @@ impl Ctx {
         self.state.borrow_mut().render.writing = false;
     }
 
-    fn any_table_cell_focused(&self) -> bool {
-        let state = self.state.borrow();
-        state.render.tables.iter().any(|table| {
-            table.focus_cell.borrow().is_some() || table.grids.iter().any(grid_has_focus)
-        })
+    pub(super) fn any_table_cell_focused(&self) -> bool {
+        self.focused_table_cell().is_some()
     }
 
-    fn focused_table_index(&self) -> Option<usize> {
-        let state = self.state.borrow();
-        state.render.tables.iter().find_map(|table| {
-            if table.focus_cell.borrow().is_some() || table.grids.iter().any(grid_has_focus) {
-                Some(table.index)
-            } else {
-                None
+    pub(super) fn suspend_cursor_paint(&self, suspend: bool) {
+        self.state.borrow_mut().render.cursor_suspend = suspend;
+    }
+
+    fn lock_source_input(&self, lock: bool) {
+        let mode = self.state.borrow().view_mode;
+        let allow = (mode == ViewMode::Edit || mode == ViewMode::Render) && !lock;
+        for view in &self.widgets.views {
+            view.set_editable(allow);
+            view.set_cursor_visible(allow);
+            view.set_can_focus(allow);
+            view.action_set_enabled("undo", !lock);
+            view.action_set_enabled("redo", !lock);
+            gtk4::prelude::TextViewExt::reset_im_context(view);
+        }
+    }
+
+    fn activate_table_cell(&self, table: usize, row: usize, col: usize) {
+        if self.focused_table_cell() != Some((table, row, col)) {
+            if let Some((prev_t, prev_r, prev_c)) = self.focused_table_cell() {
+                self.commit_active_cell(prev_t, prev_r, prev_c);
             }
-        })
+            for item in &self.state.borrow().render.tables {
+                *item.focus_cell.borrow_mut() = if item.index == table {
+                    Some((row, col))
+                } else {
+                    None
+                };
+            }
+        }
+        self.paint_cell_active_class();
+        self.lock_source_input(true);
+        let Some(path) = self.focused_path() else {
+            return;
+        };
+        let Some(buffer) = self
+            .state
+            .borrow()
+            .buffers
+            .get(&path)
+            .map(|entry| entry.buffer.clone())
+        else {
+            return;
+        };
+        self.state.borrow_mut().render.parking = true;
+        self.park_cursor_at_table(&buffer, table);
+        self.recover_table_cover(&buffer);
+        self.state.borrow_mut().render.parking = false;
+        self.clear_cell_history();
+        if let Some(entry) = self.table_entry(table, row, col) {
+            entry.set_can_focus(true);
+            entry.grab_focus();
+            let n = chars_of(&entry);
+            self.state.borrow_mut().render.cell_typing = false;
+            self.set_cell_range(&entry, n, n);
+        }
+    }
+
+    fn on_table_cell_click(&self, table: usize, row: usize, col: usize, x: f64, n_press: i32) {
+        let same = self.focused_table_cell() == Some((table, row, col));
+        if !same {
+            self.activate_table_cell(table, row, col);
+        }
+        let Some(entry) = self.table_entry(table, row, col) else {
+            return;
+        };
+        entry.set_can_focus(true);
+        entry.grab_focus();
+        let index = cell_index_at_x(&entry, x);
+        let typing = n_press >= 2 || same;
+        self.state.borrow_mut().render.cell_typing = typing;
+        self.set_cell_range(&entry, index, index);
+    }
+
+    fn set_cell_range(&self, entry: &gtk4::Entry, caret: i32, anchor: i32) {
+        let n = chars_of(entry);
+        {
+            let mut state = self.state.borrow_mut();
+            state.render.cell_caret = caret.clamp(0, n);
+            state.render.cell_anchor = anchor.clamp(0, n);
+        }
+        self.apply_cell_cursor(entry);
+    }
+
+    fn apply_cell_cursor(&self, entry: &gtk4::Entry) {
+        let (caret, anchor) = {
+            let render = &self.state.borrow().render;
+            (render.cell_caret, render.cell_anchor)
+        };
+        let n = chars_of(entry);
+        let caret = caret.clamp(0, n);
+        let anchor = anchor.clamp(0, n);
+        if caret == anchor {
+            entry.select_region(caret, caret);
+            entry.set_position(caret);
+        } else {
+            entry.select_region(caret.min(anchor), caret.max(anchor));
+            entry.set_position(caret);
+        }
+        self.sync_cell_caret_bar(entry);
+    }
+
+    fn sync_cell_caret_bar(&self, entry: &gtk4::Entry) {
+        let Some(overlay) = entry
+            .parent()
+            .and_then(|parent| parent.downcast::<gtk4::Overlay>().ok())
+        else {
+            return;
+        };
+        let Some(bar) = overlay_caret_bar(&overlay) else {
+            return;
+        };
+        let caret = self.state.borrow().render.cell_caret;
+        bar.set_visible(true);
+        bar.set_margin_start(cell_caret_pixel_x(entry, caret).max(0));
+    }
+
+    fn deactivate_table_cells(&self) {
+        if let Some((table, row, col)) = self.focused_table_cell() {
+            self.commit_active_cell(table, row, col);
+        }
+        for item in &self.state.borrow().render.tables {
+            *item.focus_cell.borrow_mut() = None;
+        }
+        self.paint_cell_active_class();
+        self.lock_source_input(false);
+        self.focused_view().grab_focus();
+    }
+
+    fn commit_active_cell(&self, table: usize, row: usize, col: usize) {
+        let Some(path) = self.focused_path() else {
+            return;
+        };
+        let Some(entry) = self.table_entry(table, row, col) else {
+            return;
+        };
+        self.commit_table_cell(path, table, row, col, format!(" {} ", entry.text()));
+    }
+
+    fn table_entry(&self, table: usize, row: usize, col: usize) -> Option<gtk4::Entry> {
+        let pane = self.focused_index();
+        let state = self.state.borrow();
+        let live = state.render.tables.iter().find(|item| item.index == table)?;
+        live.grids[pane]
+            .child_at(col as i32, row as i32)
+            .as_ref()
+            .and_then(cell_entry_of)
+    }
+
+    fn paint_cell_active_class(&self) {
+        let active = self.focused_table_cell();
+        let tables: Vec<[gtk4::Grid; 2]> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| table.grids.clone())
+            .collect();
+        let indices: Vec<usize> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| table.index)
+            .collect();
+        for (grids, index) in tables.iter().zip(indices) {
+            for grid in grids {
+                let mut child = grid.first_child();
+                while let Some(widget) = child {
+                    let next = widget.next_sibling();
+                    clear_cell_active(&widget);
+                    child = next;
+                }
+            }
+            if let Some((table, row, col)) = active {
+                if table == index {
+                    for grid in grids {
+                        if let Some(widget) = grid.child_at(col as i32, row as i32) {
+                            mark_cell_active(&widget);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_table_key(
+        &self,
+        keyval: gdk::Key,
+        modifier: gdk::ModifierType,
+    ) -> glib::Propagation {
+        let Some((table, row, col)) = self.focused_table_cell() else {
+            return glib::Propagation::Proceed;
+        };
+        let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+        let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
+        if ctrl && (keyval == gdk::Key::z || keyval == gdk::Key::Z) {
+            if shift {
+                self.redo_cell_text();
+            } else {
+                self.undo_cell_text();
+            }
+            return glib::Propagation::Stop;
+        }
+        if ctrl && (keyval == gdk::Key::y || keyval == gdk::Key::Y) {
+            self.redo_cell_text();
+            return glib::Propagation::Stop;
+        }
+        if keyval == gdk::Key::Escape {
+            self.deactivate_table_cells();
+            return glib::Propagation::Stop;
+        }
+        let Some(path) = self.focused_path() else {
+            return glib::Propagation::Stop;
+        };
+        let Some(grid) = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .find(|item| item.index == table)
+            .map(|item| item.grids[self.focused_index()].clone())
+        else {
+            return glib::Propagation::Stop;
+        };
+        let cols = grid_columns(&grid);
+        let rows = grid_rows(&grid);
+        if keyval == gdk::Key::Tab {
+            let (nr, nc) = if col + 1 < cols {
+                (row, col + 1)
+            } else if row + 1 < rows {
+                (row + 1, 0)
+            } else {
+                self.table_add_row(path, table);
+                return glib::Propagation::Stop;
+            };
+            self.activate_table_cell(table, nr, nc);
+            return glib::Propagation::Stop;
+        }
+        if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
+            if row + 1 < rows {
+                self.activate_table_cell(table, row + 1, col);
+            } else {
+                self.table_add_row(path, table);
+            }
+            return glib::Propagation::Stop;
+        }
+        if keyval == gdk::Key::F2 {
+            let Some(entry) = self.table_entry(table, row, col) else {
+                return glib::Propagation::Stop;
+            };
+            let n = chars_of(&entry);
+            self.state.borrow_mut().render.cell_typing = true;
+            self.set_cell_range(&entry, n, n);
+            return glib::Propagation::Stop;
+        }
+        let typing = self.state.borrow().render.cell_typing;
+        if !typing
+            && ((!shift
+                && matches!(
+                    keyval,
+                    gdk::Key::Left
+                        | gdk::Key::Right
+                        | gdk::Key::Up
+                        | gdk::Key::Down
+                        | gdk::Key::Home
+                        | gdk::Key::End
+                ))
+                || matches!(keyval, gdk::Key::Up | gdk::Key::Down))
+        {
+            let (drow, dcol) = match keyval {
+                gdk::Key::Left | gdk::Key::Home => (0, -1),
+                gdk::Key::Right | gdk::Key::End => (0, 1),
+                gdk::Key::Up => (-1, 0),
+                gdk::Key::Down => (1, 0),
+                _ => (0, 0),
+            };
+            self.move_table_cell(path, table, row, col, rows, cols, drow, dcol);
+            return glib::Propagation::Stop;
+        }
+        if typing && keyval == gdk::Key::Up {
+            self.move_table_cell(path, table, row, col, rows, cols, -1, 0);
+            return glib::Propagation::Stop;
+        }
+        if typing && keyval == gdk::Key::Down {
+            self.move_table_cell(path, table, row, col, rows, cols, 1, 0);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && !(keyval == gdk::Key::a || keyval == gdk::Key::A
+            || keyval == gdk::Key::Left
+            || keyval == gdk::Key::Right)
+        {
+            return glib::Propagation::Proceed;
+        }
+        let Some(entry) = self.table_entry(table, row, col) else {
+            return glib::Propagation::Stop;
+        };
+        self.feed_cell_key(&entry, keyval, modifier);
+        glib::Propagation::Stop
+    }
+
+    fn move_table_cell(
+        &self,
+        path: PathBuf,
+        table: usize,
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+        drow: i32,
+        dcol: i32,
+    ) {
+        let nr = row as i32 + drow;
+        let nc = col as i32 + dcol;
+        if nr < 0 {
+            self.deactivate_table_cells();
+            self.place_cursor_near_table(table, true);
+            return;
+        }
+        if nr >= rows as i32 {
+            self.table_add_row(path, table);
+            return;
+        }
+        if nc < 0 {
+            if nr > 0 {
+                self.activate_table_cell(table, (nr - 1) as usize, cols.saturating_sub(1));
+            } else {
+                self.deactivate_table_cells();
+                self.place_cursor_near_table(table, true);
+            }
+            return;
+        }
+        if nc >= cols as i32 {
+            if (nr as usize) + 1 < rows {
+                self.activate_table_cell(table, (nr as usize) + 1, 0);
+            } else {
+                self.table_add_row(path, table);
+            }
+            return;
+        }
+        self.activate_table_cell(table, nr as usize, nc as usize);
+    }
+
+    fn feed_cell_key(&self, entry: &gtk4::Entry, keyval: gdk::Key, modifier: gdk::ModifierType) {
+        let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
+        let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
+        let text = entry.text().to_string();
+        let n = chars_of(entry);
+        let (caret, anchor, typing) = {
+            let render = &self.state.borrow().render;
+            (
+                render.cell_caret.clamp(0, n),
+                render.cell_anchor.clamp(0, n),
+                render.cell_typing,
+            )
+        };
+        if ctrl && (keyval == gdk::Key::a || keyval == gdk::Key::A) {
+            self.state.borrow_mut().render.cell_typing = true;
+            self.set_cell_range(entry, n, 0);
+            return;
+        }
+        if matches!(
+            keyval,
+            gdk::Key::Left | gdk::Key::Right | gdk::Key::Home | gdk::Key::End
+        ) {
+            let target = match keyval {
+                gdk::Key::Left if ctrl => skip_word(&text, caret, -1),
+                gdk::Key::Left => (caret - 1).max(0),
+                gdk::Key::Right if ctrl => skip_word(&text, caret, 1),
+                gdk::Key::Right => (caret + 1).min(n),
+                gdk::Key::Home => 0,
+                gdk::Key::End => n,
+                _ => caret,
+            };
+            let new_anchor = if shift { anchor } else { target };
+            self.state.borrow_mut().render.cell_typing = true;
+            self.set_cell_range(entry, target, new_anchor);
+            return;
+        }
+        if keyval == gdk::Key::BackSpace {
+            let (start, end) = if let Some(span) = text_selection(typing, caret, anchor) {
+                span
+            } else if caret > 0 {
+                (caret - 1, caret)
+            } else {
+                self.apply_cell_cursor(entry);
+                return;
+            };
+            self.remember_cell_text(&text);
+            let (new_text, pos) = splice_chars(&text, start, end, "");
+            entry.set_text(&new_text);
+            self.state.borrow_mut().render.cell_typing = true;
+            self.set_cell_range(entry, pos, pos);
+            return;
+        }
+        if keyval == gdk::Key::Delete {
+            let (start, end) = if let Some(span) = text_selection(typing, caret, anchor) {
+                span
+            } else if caret < n {
+                (caret, caret + 1)
+            } else {
+                self.apply_cell_cursor(entry);
+                return;
+            };
+            self.remember_cell_text(&text);
+            let (new_text, pos) = splice_chars(&text, start, end, "");
+            entry.set_text(&new_text);
+            self.state.borrow_mut().render.cell_typing = true;
+            self.set_cell_range(entry, pos, pos);
+            return;
+        }
+        let Some(ch) = keyval.to_unicode() else {
+            return;
+        };
+        if ch.is_control() {
+            return;
+        }
+        let (start, end) = text_selection(typing, caret, anchor).unwrap_or((caret, caret));
+        self.remember_cell_text(&text);
+        let (new_text, pos) = splice_chars(&text, start, end, &ch.to_string());
+        entry.set_text(&new_text);
+        self.state.borrow_mut().render.cell_typing = true;
+        self.set_cell_range(entry, pos, pos);
+    }
+
+    fn clear_cell_history(&self) {
+        let mut state = self.state.borrow_mut();
+        state.render.cell_undo.clear();
+        state.render.cell_redo.clear();
+    }
+
+    fn remember_cell_text(&self, text: &str) {
+        let (caret, anchor) = {
+            let render = &self.state.borrow().render;
+            (render.cell_caret, render.cell_anchor)
+        };
+        let mut state = self.state.borrow_mut();
+        state.render.cell_redo.clear();
+        state
+            .render
+            .cell_undo
+            .push((text.to_string(), caret, anchor));
+        if state.render.cell_undo.len() > 200 {
+            state.render.cell_undo.remove(0);
+        }
+    }
+
+    pub(super) fn undo_cell_text(&self) {
+        self.step_cell_history(true);
+    }
+
+    pub(super) fn redo_cell_text(&self) {
+        self.step_cell_history(false);
+    }
+
+    fn step_cell_history(&self, undo: bool) {
+        let Some((table, row, col)) = self.focused_table_cell() else {
+            return;
+        };
+        let Some(entry) = self.table_entry(table, row, col) else {
+            return;
+        };
+        let current = (
+            entry.text().to_string(),
+            self.state.borrow().render.cell_caret,
+            self.state.borrow().render.cell_anchor,
+        );
+        let restored = {
+            let mut state = self.state.borrow_mut();
+            let render = &mut state.render;
+            let item = if undo {
+                render.cell_undo.pop()
+            } else {
+                render.cell_redo.pop()
+            };
+            let Some(item) = item else {
+                return;
+            };
+            if undo {
+                render.cell_redo.push(current);
+            } else {
+                render.cell_undo.push(current);
+            }
+            item
+        };
+        entry.set_text(&restored.0);
+        self.state.borrow_mut().render.cell_typing = true;
+        self.set_cell_range(&entry, restored.1, restored.2);
     }
 
     fn ensure_render_tags(&self, buffer: &sourceview5::Buffer) {
@@ -383,7 +1266,12 @@ impl Ctx {
             tag.set_family(Some("monospace"));
         });
         ensure_tag(&table, TAG_HIDE, hide_source);
-        ensure_tag(&table, TAG_TABLE, hide_source);
+        ensure_tag(&table, TAG_TABLE, hide_table_source);
+        ensure_tag(&table, TAG_ZOOM, |tag| {
+            tag.set_scale(zoom::webkit_factor(
+                self.state.borrow().session.text_pt,
+            ));
+        });
         ensure_tag(&table, TAG_LINK, |tag| {
             tag.set_underline(pango::Underline::Single);
         });
@@ -396,6 +1284,12 @@ impl Ctx {
                 tag.set_weight(700);
                 tag.set_scale(scale);
             });
+        }
+        if let Some(tag) = table.lookup(TAG_TABLE) {
+            raise_tag(&table, &tag);
+        }
+        if let Some(tag) = table.lookup(TAG_HIDE) {
+            raise_tag(&table, &tag);
         }
     }
 
@@ -413,23 +1307,41 @@ impl Ctx {
         }
         self.state.borrow_mut().render.cursor_hooked.push(ptr);
         let ctx = self.clone();
-        buffer.connect_mark_set(move |_buf, iter, mark| {
+        buffer.connect_insert_text(move |buffer, _, _| {
+            if ctx.state.borrow().render.writing {
+                return;
+            }
+            if ctx.any_table_cell_focused() {
+                glib::signal::signal_stop_emission_by_name(buffer, "insert-text");
+            }
+        });
+        let ctx = self.clone();
+        buffer.connect_delete_range(move |buffer, _, _| {
+            if ctx.state.borrow().render.writing {
+                return;
+            }
+            if ctx.any_table_cell_focused() {
+                glib::signal::signal_stop_emission_by_name(buffer, "delete-range");
+            }
+        });
+        let ctx = self.clone();
+        buffer.connect_mark_set(move |buf, iter, mark| {
             if mark.name().as_deref() != Some("insert") {
                 return;
             }
             if ctx.state.borrow().view_mode != ViewMode::Render {
                 return;
             }
-            if ctx.state.borrow().render.writing {
-                return;
-            }
-            let line = iter.line();
-            if ctx.state.borrow().render.cursor_line == Some(line) {
+            if ctx.state.borrow().render.writing
+                || ctx.state.borrow().render.parking
+                || ctx.state.borrow().render.cursor_suspend
+            {
                 return;
             }
             if !ctx.state.borrow().render.painted {
                 return;
             }
+            let line = iter.line();
             let hit = ctx
                 .state
                 .borrow()
@@ -437,27 +1349,78 @@ impl Ctx {
                 .tables
                 .iter()
                 .find(|table| line >= table.start_line && line < table.end_line)
-                .map(|table| table.index);
-            if let Some(index) = hit {
-                ctx.state.borrow_mut().render.cursor_line = Some(line);
-                ctx.focus_table_cell(index, 0, 0);
+                .map(|table| (table.index, table.start_line));
+            if let Some((index, start_line)) = hit {
+                ctx.state.borrow_mut().render.parking = true;
+                ctx.state.borrow_mut().render.cursor_line = Some(start_line);
+                ctx.park_cursor_at_table(buf, index);
+                ctx.recover_table_cover(buf);
+                ctx.state.borrow_mut().render.parking = false;
+                if !ctx.any_table_cell_focused() {
+                    ctx.activate_table_cell(index, 0, 0);
+                }
+                return;
+            }
+            if ctx.state.borrow().render.cursor_line == Some(line) {
                 return;
             }
             ctx.shift_cursor_line(line);
         });
     }
 
-    fn focus_table_cell(&self, table: usize, row: usize, col: usize) {
-        let state = self.state.borrow();
-        let Some(live) = state.render.tables.iter().find(|item| item.index == table) else {
+    fn park_cursor_at_table(&self, buffer: &sourceview5::Buffer, table: usize) {
+        let Some(anchor) = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .find(|item| item.index == table)
+            .map(|item| item.anchor.clone())
+        else {
             return;
         };
-        let pane = self.focused_index();
-        if let Some(child) = live.grids[pane]
-            .child_at(col as i32, row as i32)
-            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
-        {
-            child.grab_focus();
+        if anchor.is_deleted() {
+            return;
+        }
+        let iter = buffer.iter_at_child_anchor(&anchor);
+        buffer.place_cursor(&iter);
+    }
+
+    fn recover_table_cover(&self, buffer: &sourceview5::Buffer) {
+        let text = buffer_text_of(buffer);
+        let tables: Vec<(usize, usize)> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| (table.start, table.end))
+            .collect();
+        let table_anchors: Vec<_> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .map(|table| table.anchor.clone())
+            .collect();
+        let image_anchors: Vec<_> = self
+            .state
+            .borrow()
+            .render
+            .images
+            .iter()
+            .map(|image| image.anchor.clone())
+            .collect();
+        for (start, end) in tables {
+            cover_table_source(buffer, &text, start, end);
+        }
+        for anchor in &table_anchors {
+            lift_anchor_scale(buffer, anchor);
+        }
+        for anchor in &image_anchors {
+            lift_anchor_scale(buffer, anchor);
         }
     }
 
@@ -482,11 +1445,19 @@ impl Ctx {
         let line_starts = self.state.borrow().render.line_starts.clone();
         let text_len = self.state.borrow().render.text_len;
         self.state.borrow_mut().render.cursor_line = Some(line);
+        let mut fresh = true;
         if let Some(prev) = prev {
-            retag_cursor_line(&buffer, &spans, &line_starts, text_len, prev, false);
+            if !line_in_live_table(&self.state.borrow().render, prev) {
+                fresh &= retag_cursor_line(&buffer, &spans, &line_starts, text_len, prev, false);
+            }
         }
-        retag_cursor_line(&buffer, &spans, &line_starts, text_len, line, true);
+        if !line_in_live_table(&self.state.borrow().render, line) {
+            fresh &= retag_cursor_line(&buffer, &spans, &line_starts, text_len, line, true);
+        }
         self.state.borrow_mut().render.spans = spans;
+        if !fresh {
+            self.schedule_render();
+        }
     }
 
     fn rebuild_widgets(
@@ -500,14 +1471,14 @@ impl Ctx {
         let md_tables = tables::parse_tables(&text);
         let bodies: Vec<String> = md_tables
             .iter()
-            .map(|table| text[table.start.min(text.len())..table.end.min(text.len())].to_string())
+            .map(|table| slice_bytes(&text, table.start, table.end).to_string())
             .collect();
         let image_keys: Vec<String> = spans
             .iter()
             .filter_map(|span| match &span.kind {
                 MarkKind::Image { dest } => Some(format!(
                     "{dest}\n{}",
-                    &text[span.start.min(text.len())..span.end.min(text.len())]
+                    slice_bytes(&text, span.start, span.end)
                 )),
                 _ => None,
             })
@@ -526,8 +1497,8 @@ impl Ctx {
                     for (live, table) in state.render.tables.iter_mut().zip(md_tables.iter()) {
                         live.start = table.start;
                         live.end = table.end;
-                        live.start_line = newline_count(&text[..table.start.min(text.len())]);
-                        let mut end_line = newline_count(&text[..table.end.min(text.len())]);
+                        live.start_line = newline_count(slice_bytes(&text, 0, table.start));
+                        let mut end_line = newline_count(slice_bytes(&text, 0, table.end));
                         if end_line <= live.start_line {
                             end_line = live.start_line + 1;
                         }
@@ -545,11 +1516,38 @@ impl Ctx {
                 )
             };
             if let Some(prev) = prev_line {
-                if prev != cursor_line {
+                if prev != cursor_line && !line_in_live_table(&self.state.borrow().render, prev) {
                     retag_cursor_line(buffer, &spans, &line_starts, text_len, prev, false);
                 }
             }
-            retag_cursor_line(buffer, &spans, &line_starts, text_len, cursor_line, true);
+            if !line_in_live_table(&self.state.borrow().render, cursor_line) {
+                retag_cursor_line(buffer, &spans, &line_starts, text_len, cursor_line, true);
+            }
+            cover_embedded_source(buffer, &text, &md_tables, &spans, cursor_line);
+            let table_anchors: Vec<_> = self
+                .state
+                .borrow()
+                .render
+                .tables
+                .iter()
+                .map(|table| table.anchor.clone())
+                .collect();
+            let image_anchors: Vec<_> = self
+                .state
+                .borrow()
+                .render
+                .images
+                .iter()
+                .map(|image| image.anchor.clone())
+                .collect();
+            for anchor in &table_anchors {
+                lift_anchor_scale(buffer, anchor);
+            }
+            for anchor in &image_anchors {
+                lift_anchor_scale(buffer, anchor);
+            }
+            self.apply_text_zoom_tags();
+            self.sync_table_grid_widths();
             return;
         }
 
@@ -560,26 +1558,9 @@ impl Ctx {
                 std::mem::take(&mut state.render.images),
             )
         };
-        for table in &old_tables {
-            for grid in &table.grids {
-                detach_child(grid);
-            }
-        }
-        for image in &old_images {
-            for widget in &image.widgets {
-                detach_child(widget);
-            }
-        }
+        self.drop_embeds(&old_tables, &old_images);
 
-        self.state.borrow_mut().render.writing = true;
-        remove_anchors(
-            &buffer.clone().upcast::<gtk4::TextBuffer>(),
-            &old_tables,
-            &old_images,
-        );
-        self.state.borrow_mut().render.writing = false;
-
-        paint_tags(buffer, &text, &spans, cursor_line);
+        paint_tags(buffer, &text, &spans, cursor_line, &md_tables);
 
         let cursor_range = line_byte_range(&text, cursor_line);
         let mut placements: Vec<Placement> = md_tables
@@ -635,6 +1616,11 @@ impl Ctx {
             state.render.images = live_images;
         }
         self.store_paint(&text, spans, cursor_line, bodies, image_keys);
+        self.apply_text_zoom_tags();
+        self.restore_table_focus();
+        self.sync_table_grid_widths();
+        let ctx = self.clone();
+        glib::idle_add_local_once(move || ctx.sync_table_grid_widths());
     }
 
     fn store_paint(
@@ -674,15 +1660,15 @@ impl Ctx {
         ];
         for (pane, grid) in grids.iter().enumerate() {
             self.widgets.views[pane].add_child_at_anchor(grid, &anchor);
-            let width = self.widgets.views[pane].width().max(120);
-            grid.set_size_request(width.saturating_sub(32), -1);
+            size_table_grid(grid, &self.widgets.views[pane]);
         }
-        let start_line = newline_count(&text[..table.start.min(text.len())]);
-        let mut end_line = newline_count(&text[..table.end.min(text.len())]);
+        let start_line = newline_count(slice_bytes(&text, 0, table.start));
+        let mut end_line = newline_count(slice_bytes(&text, 0, table.end));
         if end_line <= start_line {
             end_line = start_line + 1;
         }
         Some(LiveTable {
+            path: path.to_path_buf(),
             index,
             start: table.start,
             end: table.end,
@@ -711,6 +1697,7 @@ impl Ctx {
         self.widgets.views[0].add_child_at_anchor(&w0, &anchor);
         self.widgets.views[1].add_child_at_anchor(&w1, &anchor);
         Some(LiveImage {
+            path: path.to_path_buf(),
             anchor,
             widgets: [w0, w1],
         })
@@ -762,7 +1749,7 @@ fn build_table_grid(
     path: &Path,
     table: &MdTable,
     table_index: usize,
-    focus_cell: Rc<RefCell<Option<(usize, usize)>>>,
+    _focus_cell: Rc<RefCell<Option<(usize, usize)>>>,
 ) -> gtk4::Grid {
     let grid = gtk4::Grid::new();
     grid.add_css_class("tw-md-table");
@@ -770,6 +1757,9 @@ fn build_table_grid(
     grid.set_column_spacing(0);
     grid.set_row_spacing(0);
     grid.set_hexpand(true);
+    grid.set_halign(gtk4::Align::Fill);
+    grid.set_can_target(true);
+    bind_table_cell_css(&grid);
 
     let rows = table.row_count();
     let cols = table.column_count();
@@ -782,10 +1772,19 @@ fn build_table_grid(
             let entry = gtk4::Entry::new();
             entry.set_text(raw.trim());
             entry.set_hexpand(true);
+            entry.set_halign(gtk4::Align::Fill);
+            entry.set_width_chars(8);
+            entry.set_editable(true);
+            entry.set_can_focus(true);
+            entry.set_focus_on_click(false);
             entry.add_css_class("tw-md-cell");
             if row == 0 {
                 entry.add_css_class("tw-md-cell-head");
             }
+            bind_table_cell_css(&entry);
+            entry.connect_realize(|entry| {
+                bind_table_cell_css(entry);
+            });
             match table.alignments.get(col).copied().unwrap_or(ColAlign::None) {
                 ColAlign::Left | ColAlign::None => {
                     gtk4::prelude::EditableExt::set_alignment(&entry, 0.0);
@@ -794,96 +1793,64 @@ fn build_table_grid(
                 ColAlign::Right => gtk4::prelude::EditableExt::set_alignment(&entry, 1.0),
             }
 
-            let focus = focus_cell.clone();
-            entry.connect_has_focus_notify(move |entry| {
-                if entry.has_focus() {
-                    *focus.borrow_mut() = Some((row, col));
-                } else if focus.borrow().as_ref() == Some(&(row, col)) {
-                    *focus.borrow_mut() = None;
-                }
+            let ctx_cell = ctx.clone();
+            let grab = gtk4::GestureClick::new();
+            grab.set_button(1);
+            grab.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            grab.connect_pressed(move |gesture, n_press, x, _| {
+                ctx_cell.on_table_cell_click(table_index, row, col, x, n_press);
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
             });
-
-            let ctx_commit = ctx.clone();
-            let path_commit = path.to_path_buf();
-            let entry_commit = entry.clone();
-            entry.connect_has_focus_notify(move |entry| {
-                if entry.has_focus() {
-                    return;
-                }
-                ctx_commit.commit_table_cell(
-                    path_commit.clone(),
+            entry.add_controller(grab);
+            let ctx_menu = ctx.clone();
+            let path_menu = path.to_path_buf();
+            let entry_menu = entry.clone();
+            let right = gtk4::GestureClick::new();
+            right.set_button(3);
+            right.connect_pressed(move |gesture, _, _, _| {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                ctx_menu.show_table_menu(
+                    entry_menu.upcast_ref(),
+                    path_menu.clone(),
                     table_index,
                     row,
                     col,
-                    format!(" {} ", entry_commit.text()),
                 );
             });
-
-            let key = gtk4::EventControllerKey::new();
-            key.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            let ctx_key = ctx.clone();
-            let path_key = path.to_path_buf();
-            let grid_key = grid.clone();
-            let focus_key = focus_cell.clone();
-            key.connect_key_pressed(move |_, keyval, _, modifier| {
-                let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
-                let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
-                if ctrl && (keyval == gdk::Key::z || keyval == gdk::Key::Z) {
-                    if shift {
-                        ctx_key.edit_redo();
-                    } else {
-                        ctx_key.edit_undo();
-                    }
-                    return glib::Propagation::Stop;
+            entry.add_controller(right);
+            let ctx_alloc = ctx.clone();
+            entry.connect_notify_local(Some("width"), move |entry, _| {
+                if ctx_alloc.focused_table_cell() == Some((table_index, row, col)) {
+                    ctx_alloc.sync_cell_caret_bar(entry);
                 }
-                if ctrl && (keyval == gdk::Key::y || keyval == gdk::Key::Y) {
-                    ctx_key.edit_redo();
-                    return glib::Propagation::Stop;
-                }
-                if keyval == gdk::Key::Tab {
-                    let (nr, nc) = if col + 1 < cols {
-                        (row, col + 1)
-                    } else if row + 1 < rows {
-                        (row + 1, 0)
-                    } else {
-                        ctx_key.table_add_row(path_key.clone(), table_index);
-                        return glib::Propagation::Stop;
-                    };
-                    if let Some(child) = grid_key
-                        .child_at(nc as i32, nr as i32)
-                        .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
-                    {
-                        child.grab_focus();
-                    }
-                    return glib::Propagation::Stop;
-                }
-                if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
-                    if row + 1 < rows {
-                        if let Some(child) = grid_key
-                            .child_at(col as i32, (row + 1) as i32)
-                            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
-                        {
-                            child.grab_focus();
-                        }
-                    } else {
-                        ctx_key.table_add_row(path_key.clone(), table_index);
-                    }
-                    return glib::Propagation::Stop;
-                }
-                if keyval == gdk::Key::Up && row == 0 {
-                    *focus_key.borrow_mut() = None;
-                    ctx_key.place_cursor_near_table(table_index, true);
-                    return glib::Propagation::Stop;
-                }
-                if keyval == gdk::Key::Down && row + 1 == rows {
-                    *focus_key.borrow_mut() = None;
-                    ctx_key.place_cursor_near_table(table_index, false);
-                    return glib::Propagation::Stop;
-                }
-                glib::Propagation::Proceed
             });
-            entry.add_controller(key);
-            grid.attach(&entry, col as i32, row as i32, 1, 1);
+            let bar = gtk4::DrawingArea::new();
+            bar.add_css_class("tw-md-caret");
+            bar.set_halign(gtk4::Align::Start);
+            bar.set_valign(gtk4::Align::Fill);
+            bar.set_can_target(false);
+            bar.set_can_focus(false);
+            bar.set_sensitive(false);
+            bar.set_visible(false);
+            bar.set_content_width(2);
+            bar.set_draw_func(|area, cr, width, height| {
+                let color = area.color();
+                cr.set_source_rgba(
+                    f64::from(color.red()),
+                    f64::from(color.green()),
+                    f64::from(color.blue()),
+                    f64::from(color.alpha()),
+                );
+                cr.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+                let _ = cr.fill();
+            });
+            let overlay = gtk4::Overlay::new();
+            overlay.set_hexpand(true);
+            overlay.set_halign(gtk4::Align::Fill);
+            overlay.set_child(Some(&entry));
+            overlay.add_overlay(&bar);
+            bind_table_cell_css(&overlay);
+            grid.attach(&overlay, col as i32, row as i32, 1, 1);
         }
     }
     grid
@@ -894,6 +1861,7 @@ fn paint_tags(
     text: &str,
     spans: &[MarkSpan],
     cursor_line: i32,
+    tables: &[MdTable],
 ) {
     clear_render_tags(buffer);
     let cursor_range = line_byte_range(text, cursor_line);
@@ -929,7 +1897,12 @@ fn paint_tags(
         }
     }
     if let Some((start, end)) = cursor_range {
-        jobs.push((start, end, TAG_MONO));
+        let on_table = tables
+            .iter()
+            .any(|table| table.start < end && table.end > start);
+        if !on_table {
+            jobs.push((start, end, TAG_MONO));
+        }
     }
     jobs.sort_by_key(|job| job.0);
     let mut walk = ByteCursor::new(buffer, text);
@@ -947,11 +1920,11 @@ fn cover_embedded_source(
     spans: &[MarkSpan],
     cursor_line: i32,
 ) {
+    for table in tables {
+        cover_table_source(buffer, text, table.start, table.end);
+    }
     let cursor_range = line_byte_range(text, cursor_line);
     let mut jobs: Vec<(usize, usize, &'static str)> = Vec::new();
-    for table in tables {
-        jobs.push((table.start, table.end, TAG_TABLE));
-    }
     for span in spans {
         if let MarkKind::Image { .. } = &span.kind {
             let on_cursor = line_contains(cursor_range, span.start)
@@ -968,6 +1941,23 @@ fn cover_embedded_source(
     }
 }
 
+fn cover_table_source(buffer: &sourceview5::Buffer, text: &str, start: usize, end: usize) {
+    let mut from = iter_at_file_byte(buffer, text, start);
+    let to = iter_at_file_byte(buffer, text, end);
+    if from.child_anchor().is_some() {
+        from.forward_char();
+    }
+    if from.offset() >= to.offset() {
+        return;
+    }
+    if let Some(tag) = buffer.tag_table().lookup(TAG_TABLE) {
+        buffer.apply_tag(&tag, &from, &to);
+    }
+    if let Some(tag) = buffer.tag_table().lookup(TAG_ZOOM) {
+        buffer.remove_tag(&tag, &from, &to);
+    }
+}
+
 fn lift_anchor_scale(buffer: &sourceview5::Buffer, anchor: &gtk4::TextChildAnchor) {
     let a = buffer.iter_at_child_anchor(anchor);
     let mut b = a.clone();
@@ -978,6 +1968,9 @@ fn lift_anchor_scale(buffer: &sourceview5::Buffer, anchor: &gtk4::TextChildAncho
         buffer.remove_tag(&tag, &a, &b);
     }
     if let Some(tag) = buffer.tag_table().lookup(TAG_HIDE) {
+        buffer.remove_tag(&tag, &a, &b);
+    }
+    if let Some(tag) = buffer.tag_table().lookup(TAG_ZOOM) {
         buffer.remove_tag(&tag, &a, &b);
     }
 }
@@ -998,23 +1991,28 @@ fn retag_cursor_line(
     text_len: usize,
     line: i32,
     on_cursor: bool,
-) {
+) -> bool {
     if line < 0 {
-        return;
+        return true;
     }
     let Some(&start) = line_starts.get(line as usize) else {
-        return;
+        return true;
     };
     let end = line_starts
         .get(line as usize + 1)
         .copied()
         .unwrap_or(text_len);
     let Some(from) = buffer.iter_at_line(line) else {
-        return;
+        return true;
     };
     let mut to = from.clone();
     if !to.forward_line() {
         to = buffer.end_iter();
+    }
+    let raw = buffer.slice(&from, &to, true);
+    let line_text = raw.replace('\u{FFFC}', "");
+    if line_text.len() != end.saturating_sub(start) {
+        return false;
     }
     let table = buffer.tag_table();
     for name in [
@@ -1035,7 +2033,6 @@ fn retag_cursor_line(
             buffer.remove_tag(&tag, &from, &to);
         }
     }
-    let line_text = buffer.text(&from, &to, false);
     if on_cursor {
         if let Some(tag) = table.lookup(TAG_MONO) {
             buffer.apply_tag(&tag, &from, &to);
@@ -1087,6 +2084,7 @@ fn retag_cursor_line(
         let b = forward_in_line(&line_text, start, &mut iter, &mut at, piece_end);
         buffer.apply_tag(&tag, &a, &b);
     }
+    true
 }
 
 fn forward_in_line(
@@ -1097,8 +2095,8 @@ fn forward_in_line(
     byte: usize,
 ) -> gtk4::TextIter {
     if byte > *at {
-        let from = at.saturating_sub(line_start).min(line_text.len());
-        let to = byte.saturating_sub(line_start).min(line_text.len());
+        let from = byte_floor(line_text, at.saturating_sub(line_start));
+        let to = byte_floor(line_text, byte.saturating_sub(line_start));
         if from < to {
             let chars = line_text[from..to].chars().count();
             iter.forward_chars(chars as i32);
@@ -1134,13 +2132,14 @@ impl<'a> ByteCursor<'a> {
     }
 
     fn seek(&mut self, byte: usize) -> gtk4::TextIter {
-        let byte = byte.min(self.text.len());
+        let byte = byte_floor(self.text, byte);
         if byte < self.byte {
             self.iter = self.buffer.start_iter();
             self.byte = 0;
         }
         self.skip_anchors();
-        let extra = self.text[self.byte..byte].chars().count();
+        let origin = byte_floor(self.text, self.byte).min(byte);
+        let extra = self.text[origin..byte].chars().count();
         let mut left = extra;
         while left > 0 && !self.iter.is_end() {
             if self.iter.child_anchor().is_some() {
@@ -1203,6 +2202,39 @@ fn hide_source(tag: &gtk4::TextTag) {
     tag.set_foreground_rgba(Some(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)));
 }
 
+/// Исходник таблицы прячется без scale≈0: иначе GtkGrid наследует масштаб
+/// и превращается в чёрную полосу, а номера строк наезжают друг на друга.
+fn hide_table_source(tag: &gtk4::TextTag) {
+    tag.set_scale(1.0);
+    tag.set_invisible(true);
+}
+
+fn table_pixel_width(view: &sourceview5::View) -> i32 {
+    let mut width = view.width();
+    if width < 80 {
+        if let Some(scroll) = scrolled_of(view) {
+            width = scroll.width();
+        }
+    }
+    if width < 80 {
+        560
+    } else {
+        (width - 56).clamp(360, 2400)
+    }
+}
+
+fn size_table_grid(grid: &gtk4::Grid, view: &sourceview5::View) {
+    grid.set_size_request(table_pixel_width(view), -1);
+    grid.queue_resize();
+}
+
+fn line_in_live_table(render: &RenderState, line: i32) -> bool {
+    render
+        .tables
+        .iter()
+        .any(|table| line >= table.start_line && line < table.end_line)
+}
+
 fn ensure_tag(table: &gtk4::TextTagTable, name: &str, configure: impl FnOnce(&gtk4::TextTag)) {
     if let Some(tag) = table.lookup(name) {
         configure(&tag);
@@ -1213,12 +2245,19 @@ fn ensure_tag(table: &gtk4::TextTagTable, name: &str, configure: impl FnOnce(&gt
     table.add(&tag);
 }
 
+fn raise_tag(table: &gtk4::TextTagTable, tag: &gtk4::TextTag) {
+    let last = table.size().saturating_sub(1) as i32;
+    if last > 0 {
+        tag.set_priority(last);
+    }
+}
+
 fn iter_at_file_byte(
     buffer: &sourceview5::Buffer,
     text: &str,
     byte: usize,
 ) -> gtk4::TextIter {
-    let target_chars = text[..byte.min(text.len())].chars().count();
+    let target_chars = slice_bytes(text, 0, byte).chars().count();
     let mut iter = buffer.start_iter();
     let mut seen = 0usize;
     loop {
@@ -1257,6 +2296,23 @@ fn line_starts_of(text: &str) -> Vec<usize> {
     starts
 }
 
+fn byte_floor(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn slice_bytes(text: &str, start: usize, end: usize) -> &str {
+    let mut start = byte_floor(text, start);
+    let end = byte_floor(text, end);
+    if start > end {
+        start = end;
+    }
+    &text[start..end]
+}
+
 fn newline_count(text: &str) -> i32 {
     text.bytes().filter(|byte| *byte == b'\n').count() as i32
 }
@@ -1280,9 +2336,14 @@ fn line_contains(line: Option<(usize, usize)>, byte: usize) -> bool {
     line.is_some_and(|(a, b)| byte >= a && byte < b)
 }
 
-fn remove_anchors(buffer: &gtk4::TextBuffer, tables: &[LiveTable], images: &[LiveImage]) {
+fn remove_path_anchors(
+    buffer: &gtk4::TextBuffer,
+    tables: &[LiveTable],
+    images: &[LiveImage],
+    path: &Path,
+) {
     let mut positions: Vec<(i32, gtk4::TextChildAnchor)> = Vec::new();
-    for table in tables {
+    for table in tables.iter().filter(|table| table.path == path) {
         if !table.anchor.is_deleted() {
             positions.push((
                 buffer.iter_at_child_anchor(&table.anchor).offset(),
@@ -1290,7 +2351,7 @@ fn remove_anchors(buffer: &gtk4::TextBuffer, tables: &[LiveTable], images: &[Liv
             ));
         }
     }
-    for image in images {
+    for image in images.iter().filter(|image| image.path == path) {
         if !image.anchor.is_deleted() {
             positions.push((
                 buffer.iter_at_child_anchor(&image.anchor).offset(),
@@ -1318,15 +2379,173 @@ fn detach_child(widget: &impl IsA<gtk4::Widget>) {
     }
 }
 
-fn grid_has_focus(grid: &gtk4::Grid) -> bool {
-    let mut child = grid.first_child();
-    while let Some(widget) = child {
-        if widget.has_focus() {
+fn pick_is_table_cell(view: &impl IsA<gtk4::Widget>, x: f64, y: f64) -> bool {
+    let Some(mut widget) = view.pick(x, y, gtk4::PickFlags::DEFAULT) else {
+        return false;
+    };
+    loop {
+        if widget.has_css_class("tw-md-cell") || widget.has_css_class("tw-md-table") {
             return true;
         }
-        child = widget.next_sibling();
+        match widget.parent() {
+            Some(parent) => widget = parent,
+            None => return false,
+        }
     }
-    false
+}
+
+fn cell_entry_of(widget: &gtk4::Widget) -> Option<gtk4::Entry> {
+    if let Ok(entry) = widget.clone().downcast::<gtk4::Entry>() {
+        return Some(entry);
+    }
+    widget
+        .clone()
+        .downcast::<gtk4::Overlay>()
+        .ok()
+        .and_then(|overlay| overlay.child())
+        .and_then(|child| child.downcast::<gtk4::Entry>().ok())
+}
+
+fn overlay_caret_bar(overlay: &gtk4::Overlay) -> Option<gtk4::Widget> {
+    let mut child = overlay.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        if widget.has_css_class("tw-md-caret") {
+            return Some(widget);
+        }
+        child = next;
+    }
+    None
+}
+
+fn clear_cell_active(widget: &gtk4::Widget) {
+    widget.remove_css_class("tw-md-cell-active");
+    if let Ok(overlay) = widget.clone().downcast::<gtk4::Overlay>() {
+        if let Some(bar) = overlay_caret_bar(&overlay) {
+            bar.set_visible(false);
+        }
+        if let Some(child) = overlay.child() {
+            child.remove_css_class("tw-md-cell-active");
+        }
+    }
+}
+
+fn mark_cell_active(widget: &gtk4::Widget) {
+    widget.add_css_class("tw-md-cell-active");
+    if let Some(entry) = cell_entry_of(widget) {
+        entry.add_css_class("tw-md-cell-active");
+    }
+}
+
+fn cell_caret_pixel_x(entry: &gtk4::Entry, index: i32) -> i32 {
+    let text = entry.text().to_string();
+    let layout = pango::Layout::new(&entry.pango_context());
+    if let Some(font) = entry.pango_context().font_description() {
+        layout.set_font_description(Some(&font));
+    }
+    layout.set_text(&text);
+    let (text_w, _) = layout.pixel_size();
+    let pad = 8;
+    let extra = {
+        let inner = (entry.width() - 2 * pad - text_w).max(0) as f32;
+        let align = gtk4::prelude::EditableExt::alignment(entry);
+        (inner * align) as i32
+    };
+    let prefix: String = text.chars().take(index.max(0) as usize).collect();
+    layout.set_text(&prefix);
+    let (prefix_w, _) = layout.pixel_size();
+    pad + extra + prefix_w
+}
+
+fn grid_columns(grid: &gtk4::Grid) -> usize {
+    let mut cols = 0usize;
+    while grid.child_at(cols as i32, 0).is_some() && cols < 64 {
+        cols += 1;
+    }
+    cols
+}
+
+fn grid_rows(grid: &gtk4::Grid) -> usize {
+    let mut rows = 0usize;
+    while grid.child_at(0, rows as i32).is_some() && rows < 256 {
+        rows += 1;
+    }
+    rows
+}
+
+fn text_selection(typing: bool, caret: i32, anchor: i32) -> Option<(i32, i32)> {
+    if typing && caret != anchor {
+        Some((caret.min(anchor), caret.max(anchor)))
+    } else {
+        None
+    }
+}
+
+fn chars_of(entry: &gtk4::Entry) -> i32 {
+    entry.text().chars().count() as i32
+}
+
+fn cell_index_at_x(entry: &gtk4::Entry, x: f64) -> i32 {
+    let text = entry.text().to_string();
+    if text.is_empty() {
+        return 0;
+    }
+    let layout = pango::Layout::new(&entry.pango_context());
+    layout.set_text(&text);
+    if let Some(font) = entry.pango_context().font_description() {
+        layout.set_font_description(Some(&font));
+    }
+    let pad = 8.0;
+    let x_pango = ((x - pad).max(0.0) * f64::from(pango::SCALE)) as i32;
+    let (_, byte_index, _) = layout.xy_to_index(x_pango, 0);
+    let mut byte_index = (byte_index as usize).min(text.len());
+    while byte_index > 0 && !text.is_char_boundary(byte_index) {
+        byte_index -= 1;
+    }
+    text[..byte_index].chars().count() as i32
+}
+
+fn splice_chars(text: &str, start: i32, end: i32, insert: &str) -> (String, i32) {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len() as i32;
+    let mut start = start.clamp(0, n) as usize;
+    let mut end = end.clamp(0, n) as usize;
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    let mut out = String::new();
+    out.extend(chars[..start].iter());
+    out.push_str(insert);
+    out.extend(chars[end..].iter());
+    let pos = start as i32 + insert.chars().count() as i32;
+    (out, pos)
+}
+
+fn skip_word(text: &str, pos: i32, dir: i32) -> i32 {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len() as i32;
+    let mut i = pos.clamp(0, n);
+    if dir < 0 {
+        if i == 0 {
+            return 0;
+        }
+        i -= 1;
+        while i > 0 && chars[i as usize].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[(i - 1) as usize].is_whitespace() {
+            i -= 1;
+        }
+        i
+    } else {
+        while i < n && !chars[i as usize].is_whitespace() {
+            i += 1;
+        }
+        while i < n && chars[i as usize].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
 }
 
 fn image_widget(path: Option<&Path>) -> gtk4::Widget {
