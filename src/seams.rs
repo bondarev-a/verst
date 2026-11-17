@@ -160,13 +160,13 @@ const COMMANDS: &[CommandSpec] = &[
         id: "next_open",
         title: "Следующий открытый файл",
         section: "Вид",
-        accels: &["<Control>Page_Down", "<Control>Tab"],
+        accels: &["<Control>Page_Down"],
     },
     CommandSpec {
         id: "prev_open",
         title: "Предыдущий открытый файл",
         section: "Вид",
-        accels: &["<Control>Page_Up", "<Control><Shift>ISO_Left_Tab"],
+        accels: &["<Control>Page_Up"],
     },
     CommandSpec {
         id: "word_wrap",
@@ -399,6 +399,18 @@ pub fn canonical_panel(side: PanelSide, id: &str, legacy_page: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accelerators_are_unique() {
+        let mut seen = std::collections::HashMap::new();
+        for command in commands() {
+            for accel in command.accels {
+                if let Some(other) = seen.insert(*accel, command.id) {
+                    panic!("{accel} у двух команд: {other} и {}", command.id);
+                }
+            }
+        }
+    }
 
     #[test]
     fn zoom_and_save_have_accelerators() {
