@@ -249,6 +249,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     ms(max_gap)
                 );
                 print_totals("PROF   ", &take_totals());
+                if round == 1 {
+                    save_shot(&ctx, &format!("{name}"));
+                }
                 run_steps(ctx, steps);
             });
         }
@@ -293,4 +296,32 @@ fn type_chars(ctx: Ctx, steps: Vec<Step>, left: usize) {
     glib::timeout_add_local_once(Duration::from_millis(200), move || {
         type_chars(ctx, steps, left - 1);
     });
+}
+
+/// Снимок окна в PNG, если задан VERST_SHOT_DIR.
+fn save_shot(ctx: &Ctx, name: &str) {
+    let Some(dir) = std::env::var_os("VERST_SHOT_DIR") else {
+        return;
+    };
+    let window = &ctx.widgets.window;
+    let Some(root) = window.child() else {
+        return;
+    };
+    let width = root.width();
+    let height = root.height();
+    let paintable = gtk4::WidgetPaintable::new(Some(&root));
+    let snapshot = gtk4::Snapshot::new();
+    gtk4::gdk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(width), f64::from(height));
+    let Some(node) = snapshot.to_node() else {
+        return;
+    };
+    let Some(renderer) = window.renderer() else {
+        return;
+    };
+    let texture = renderer.render_texture(&node, None);
+    let path = std::path::Path::new(&dir).join(format!("{name}.png"));
+    match texture.save_to_png(&path) {
+        Ok(()) => eprintln!("PROF shot {}", path.display()),
+        Err(error) => eprintln!("PROF shot failed: {error}"),
+    }
 }
