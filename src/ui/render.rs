@@ -2198,56 +2198,78 @@ fn forward_in_line(
     iter.clone()
 }
 
+/// Байтовые смещения текста файла → позиции в буфере.
+/// В буфере есть якоря таблиц и картинок (U+FFFC), в тексте файла их нет.
+/// Позиция ищется через `iter_at_offset` (B-дерево GTK), а не шагами по
+/// одному символу от начала буфера: раньше вложенные отрезки (заголовок
+/// и его `#`, код с двумя тегами, ссылка и её скобки) каждый раз
+/// возвращали курсор в начало, и раскраска росла квадратично.
+struct TextMap {
+    line_bytes: Vec<usize>,
+    line_chars: Vec<usize>,
+    /// Номер символа текста, перед которым стоит якорь. По возрастанию.
+    anchors: Vec<usize>,
+}
+
+impl TextMap {
+    fn new(buffer: &sourceview5::Buffer, text: &str) -> Self {
+        let mut line_bytes = vec![0];
+        let mut line_chars = vec![0];
+        let mut chars = 0usize;
+        for (index, ch) in text.char_indices() {
+            chars += 1;
+            if ch == '\n' {
+                line_bytes.push(index + 1);
+                line_chars.push(chars);
+            }
+        }
+        let mut anchors = Vec::new();
+        let raw = buffer.slice(&buffer.start_iter(), &buffer.end_iter(), true);
+        if raw.contains('\u{FFFC}') {
+            for (index, ch) in raw.chars().enumerate() {
+                if ch == '\u{FFFC}' {
+                    anchors.push(index - anchors.len());
+                }
+            }
+        }
+        Self {
+            line_bytes,
+            line_chars,
+            anchors,
+        }
+    }
+
+    /// Номер символа в тексте файла для байтового смещения.
+    fn char_index(&self, text: &str, byte: usize) -> usize {
+        let byte = byte_floor(text, byte.min(text.len()));
+        let line = self.line_bytes.partition_point(|start| *start <= byte) - 1;
+        let start = self.line_bytes[line];
+        self.line_chars[line] + text[start..byte].chars().count()
+    }
+
+    /// Смещение в буфере. Якоря на этой позиции пропускаются, как раньше.
+    fn offset(&self, text: &str, byte: usize) -> i32 {
+        let chars = self.char_index(text, byte);
+        let before = self.anchors.partition_point(|at| *at <= chars);
+        (chars + before) as i32
+    }
+
+    fn iter(&self, buffer: &sourceview5::Buffer, text: &str, byte: usize) -> gtk4::TextIter {
+        buffer.iter_at_offset(self.offset(text, byte))
+    }
+}
+
 struct ByteCursor<'a> {
-    buffer: &'a sourceview5::Buffer,
     text: &'a str,
-    iter: gtk4::TextIter,
-    byte: usize,
+    map: TextMap,
 }
 
 impl<'a> ByteCursor<'a> {
     fn new(buffer: &'a sourceview5::Buffer, text: &'a str) -> Self {
         Self {
-            buffer,
             text,
-            iter: buffer.start_iter(),
-            byte: 0,
+            map: TextMap::new(buffer, text),
         }
-    }
-
-    fn skip_anchors(&mut self) {
-        while !self.iter.is_end() && self.iter.child_anchor().is_some() {
-            if !self.iter.forward_char() {
-                break;
-            }
-        }
-    }
-
-    fn seek(&mut self, byte: usize) -> gtk4::TextIter {
-        let byte = byte_floor(self.text, byte);
-        if byte < self.byte {
-            self.iter = self.buffer.start_iter();
-            self.byte = 0;
-        }
-        self.skip_anchors();
-        let origin = byte_floor(self.text, self.byte).min(byte);
-        let extra = self.text[origin..byte].chars().count();
-        let mut left = extra;
-        while left > 0 && !self.iter.is_end() {
-            if self.iter.child_anchor().is_some() {
-                if !self.iter.forward_char() {
-                    break;
-                }
-                continue;
-            }
-            if !self.iter.forward_char() {
-                break;
-            }
-            left -= 1;
-        }
-        self.skip_anchors();
-        self.byte = byte;
-        self.iter.clone()
     }
 
     fn apply(&mut self, buffer: &sourceview5::Buffer, start: usize, end: usize, name: &str) {
@@ -2257,8 +2279,8 @@ impl<'a> ByteCursor<'a> {
         let Some(tag) = buffer.tag_table().lookup(name) else {
             return;
         };
-        let a = self.seek(start);
-        let b = self.seek(end);
+        let a = self.map.iter(buffer, self.text, start);
+        let b = self.map.iter(buffer, self.text, end);
         buffer.apply_tag(&tag, &a, &b);
     }
 }
@@ -2347,28 +2369,7 @@ fn raise_tag(table: &gtk4::TextTagTable, tag: &gtk4::TextTag) {
 
 fn iter_at_file_byte(buffer: &sourceview5::Buffer, text: &str, byte: usize) -> gtk4::TextIter {
     let _prof = crate::ui::prof::span("iter_at_file_byte");
-    let target_chars = slice_bytes(text, 0, byte).chars().count();
-    let mut iter = buffer.start_iter();
-    let mut seen = 0usize;
-    loop {
-        if iter.is_end() {
-            break;
-        }
-        if iter.child_anchor().is_some() {
-            if !iter.forward_char() {
-                break;
-            }
-            continue;
-        }
-        if seen == target_chars {
-            break;
-        }
-        seen += 1;
-        if !iter.forward_char() {
-            break;
-        }
-    }
-    iter
+    TextMap::new(buffer, text).iter(buffer, text, byte)
 }
 
 fn file_byte_at_iter(buffer: &gtk4::TextBuffer, iter: &gtk4::TextIter) -> usize {
