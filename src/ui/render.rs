@@ -58,6 +58,9 @@ pub(super) struct RenderState {
     text_len: usize,
     cursor_line: Option<i32>,
     painted: bool,
+    /// Файл, для которого посчитаны spans, таблицы и картинки.
+    /// Буфер другого файла этими данными трогать нельзя: якоря чужие.
+    painted_path: Option<PathBuf>,
     table_bodies: Vec<String>,
     image_keys: Vec<String>,
     pending_table_focus: Option<(usize, usize, usize)>,
@@ -94,8 +97,39 @@ struct LiveImage {
 }
 
 impl Ctx {
+    /// Рендер посчитан для этого файла.
+    fn render_owns(&self, path: &Path) -> bool {
+        let state = self.state.borrow();
+        state.render.painted && state.render.painted_path.as_deref() == Some(path)
+    }
+
+    /// Рендер посчитан для файла этого буфера, и этот файл сейчас в фокусе.
+    fn render_owns_buffer(&self, buffer: &sourceview5::Buffer) -> bool {
+        let Some(focused) = self.focused_path() else {
+            return false;
+        };
+        let state = self.state.borrow();
+        if !state.render.painted || state.render.painted_path.as_deref() != Some(focused.as_path()) {
+            return false;
+        }
+        state
+            .buffers
+            .get(&focused)
+            .is_some_and(|entry| &entry.buffer == buffer)
+    }
+
     pub(super) fn install_render_clicks(&self) {
         for view in &self.widgets.views {
+            // Один обработчик на вид. Раньше каждое ожидание добавляло новый.
+            let ctx = self.clone();
+            view.connect_realize(move |_| {
+                if !ctx.state.borrow().render.wait_realize {
+                    return;
+                }
+                ctx.state.borrow_mut().render.wait_realize = false;
+                let ctx = ctx.clone();
+                glib::idle_add_local_once(move || ctx.refresh_render_now());
+            });
             let click = gtk4::GestureClick::new();
             click.set_button(1);
             let ctx = self.clone();
@@ -230,7 +264,9 @@ impl Ctx {
         self.ensure_cursor_hook(&buffer);
         let cursor_line = buffer.iter_at_mark(&buffer.get_insert()).line();
         if self.any_table_cell_focused() {
-            self.recover_table_cover(&buffer);
+            if self.render_owns(&path) {
+                self.recover_table_cover(&buffer);
+            }
             return;
         }
         self.rebuild_widgets(&buffer, &path, cursor_line);
@@ -244,12 +280,6 @@ impl Ctx {
         }
         self.state.borrow_mut().render.wait_realize = true;
         let view = self.focused_view();
-        let ctx = self.clone();
-        view.connect_realize(move |_| {
-            ctx.state.borrow_mut().render.wait_realize = false;
-            let ctx = ctx.clone();
-            glib::idle_add_local_once(move || ctx.refresh_render_now());
-        });
         if view.is_realized() {
             self.state.borrow_mut().render.wait_realize = false;
             let ctx = self.clone();
@@ -274,6 +304,7 @@ impl Ctx {
             state.render.table_bodies.clear();
             state.render.image_keys.clear();
             state.render.painted = false;
+            state.render.painted_path = None;
             state.render.cursor_line = None;
             (
                 std::mem::take(&mut state.render.tables),
@@ -315,6 +346,12 @@ impl Ctx {
                 state.render.table_bodies.clear();
                 state.render.image_keys.clear();
                 state.render.painted = false;
+                state.render.painted_path = None;
+                state.render.cursor_line = None;
+            }
+            if state.render.painted_path.as_deref() == Some(path) {
+                state.render.painted = false;
+                state.render.painted_path = None;
                 state.render.cursor_line = None;
             }
             state.render.tables = keep_tables;
@@ -479,6 +516,9 @@ impl Ctx {
         let Some(path) = self.focused_path() else {
             return;
         };
+        if !self.render_owns(&path) {
+            return;
+        }
         let Some(buffer) = self
             .state
             .borrow()
@@ -1381,7 +1421,7 @@ impl Ctx {
             {
                 return;
             }
-            if !ctx.state.borrow().render.painted {
+            if !ctx.render_owns_buffer(buf) {
                 return;
             }
             let line = iter.line();
@@ -1477,6 +1517,9 @@ impl Ctx {
         let Some(path) = self.focused_path() else {
             return;
         };
+        if !self.render_owns(&path) {
+            return;
+        }
         let Some(buffer) = self
             .state
             .borrow()
@@ -1527,6 +1570,7 @@ impl Ctx {
         let same_widgets = {
             let state = self.state.borrow();
             state.render.painted
+                && state.render.painted_path.as_deref() == Some(path)
                 && state.render.table_bodies == bodies
                 && state.render.image_keys == image_keys
         };
@@ -1547,7 +1591,7 @@ impl Ctx {
                     }
                 }
             }
-            self.store_paint(&text, spans, cursor_line, bodies, image_keys);
+            self.store_paint(path, &text, spans, cursor_line, bodies, image_keys);
             let (spans, line_starts, text_len) = {
                 let render = &self.state.borrow().render;
                 (
@@ -1657,7 +1701,7 @@ impl Ctx {
             state.render.tables = live_tables;
             state.render.images = live_images;
         }
-        self.store_paint(&text, spans, cursor_line, bodies, image_keys);
+        self.store_paint(path, &text, spans, cursor_line, bodies, image_keys);
         self.apply_text_zoom_tags();
         self.restore_table_focus();
         self.sync_table_grid_widths();
@@ -1667,6 +1711,7 @@ impl Ctx {
 
     fn store_paint(
         &self,
+        path: &Path,
         text: &str,
         spans: Vec<MarkSpan>,
         cursor_line: i32,
@@ -1682,6 +1727,7 @@ impl Ctx {
         state.render.table_bodies = bodies;
         state.render.image_keys = image_keys;
         state.render.painted = true;
+        state.render.painted_path = Some(path.to_path_buf());
     }
 
     fn mount_table(
