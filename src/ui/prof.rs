@@ -256,6 +256,7 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     ms(max_gap)
                 );
                 print_totals("PROF   ", &take_totals());
+                eprintln!("PROF lists {}", ctx.lists_report());
                 if round == 1 {
                     save_shot(&ctx, &format!("{name}"));
                 }

@@ -70,7 +70,7 @@ impl Ctx {
         } else if !text_file {
             self.widgets.views[pane].set_buffer(Some(&self.widgets.empty_buffer));
         }
-        self.refresh_open_list();
+        // Списки обновляет follow_focus: второй проход здесь был лишним.
         self.follow_focus();
         self.settle_open_place(pane, &path, false);
         let ctx = self.clone();

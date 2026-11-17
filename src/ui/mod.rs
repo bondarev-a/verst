@@ -139,6 +139,7 @@ fn note_row(list: &gtk4::ListBox, text: &str) {
 
 mod ask;
 mod files;
+mod lists;
 mod navigate;
 mod notes;
 mod render;
@@ -149,6 +150,7 @@ pub(crate) mod prof;
 pub fn prof_mark_main() {
     prof::mark_main();
 }
+use lists::ListRows;
 use render::RenderState;
 use support::*;
 
@@ -199,6 +201,7 @@ pub(super) struct State {
     browsing: bool,
     mode_tick: u64,
     render: RenderState,
+    lists: ListRows,
     /// Строка, на которую надо встать после открытия файла по ссылке.
     pending_jump: Option<u32>,
     pending_view_line: Option<u32>,
@@ -1082,6 +1085,7 @@ impl Ctx {
                 browsing: false,
                 mode_tick: 0,
                 render: RenderState::default(),
+                lists: ListRows::default(),
                 pending_jump: None,
                 pending_view_line: None,
                 keep_space_tree: false,
@@ -2438,58 +2442,6 @@ impl Ctx {
         self.save_session();
     }
 
-    fn rebuild_pins(&self) {
-    let _prof = crate::ui::prof::span("rebuild_pins");
-        clear_box(&self.widgets.pins_box);
-        let files = self.state.borrow().session.open_files.clone();
-        let focused = self.focused_path();
-        if files.is_empty() {
-            let hint = gtk4::Label::new(Some("Нет открытых файлов"));
-            hint.add_css_class("dim-label");
-            hint.set_margin_start(4);
-            self.widgets.pins_box.append(&hint);
-            return;
-        }
-        for path in files.iter().rev() {
-            let dirty = self
-                .state
-                .borrow()
-                .buffers
-                .get(path)
-                .is_some_and(|entry| entry.dirty);
-            let name = file_label(path);
-            let title = if dirty { format!("● {name}") } else { name };
-            let label = gtk4::Label::new(Some(&title));
-            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            label.set_max_width_chars(28);
-            label.set_can_target(false);
-            let button = gtk4::Button::new();
-            button.set_child(Some(&label));
-            button.add_css_class("pin-name");
-            button.set_tooltip_text(Some(&path.display().to_string()));
-            if focused.as_ref() == Some(path) {
-                button.add_css_class("suggested-action");
-            }
-            let ctx = self.clone();
-            let open_path = path.clone();
-            button.connect_clicked(move |_| ctx.go(open_path.clone(), None));
-            let close = gtk4::Button::from_icon_name("window-close-symbolic");
-            close.add_css_class("flat");
-            close.add_css_class("pin-close");
-            close.set_tooltip_text(Some("Закрыть файл"));
-            let ctx = self.clone();
-            let close_path = path.clone();
-            close.connect_clicked(move |_| ctx.close_file(&close_path));
-            close.set_has_frame(false);
-            close.set_valign(gtk4::Align::Center);
-            let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
-            group.add_css_class("open-chip");
-            group.append(&button);
-            group.append(&close);
-            self.widgets.pins_box.append(&group);
-        }
-    }
-
     fn toggle_split(&self) {
         let split = !self.state.borrow().session.split;
         self.state.borrow_mut().session.split = split;
@@ -2888,86 +2840,6 @@ impl Ctx {
             popover.unparent();
         });
         popover.popup();
-    }
-
-    fn refresh_open_list(&self) {
-    let _prof = crate::ui::prof::span("refresh_open_list");
-        self.rebuild_pins();
-        self.refresh_history();
-    }
-
-    fn refresh_history(&self) {
-    let _prof = crate::ui::prof::span("refresh_history");
-        clear_list(&self.widgets.history_list);
-        let files = self.state.borrow().session.recent_files.clone();
-        if files.is_empty() {
-            self.widgets.history_list.append(&dim_row("История пуста"));
-            return;
-        }
-        let focused = self.focused_path();
-        for path in files {
-            let emphasized = focused.as_ref() == Some(&path);
-            self.widgets
-                .history_list
-                .append(&self.file_row(&path, emphasized, false));
-        }
-    }
-
-    fn file_row(&self, path: &Path, emphasized: bool, closable: bool) -> gtk4::Box {
-        let pinned = self
-            .state
-            .borrow()
-            .session
-            .pinned_files
-            .iter()
-            .any(|item| item == path);
-        let dirty = self
-            .state
-            .borrow()
-            .buffers
-            .get(path)
-            .is_some_and(|entry| entry.dirty);
-        let name = file_label(path);
-        let title = if dirty { format!("● {name}") } else { name };
-        let label = gtk4::Label::new(Some(&title));
-        label.set_halign(gtk4::Align::Start);
-        label.set_hexpand(true);
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        label.set_can_target(false);
-        if emphasized {
-            label.add_css_class("heading");
-        }
-        let pin = gtk4::Button::from_icon_name("view-pin-symbolic");
-        pin.add_css_class("flat");
-        pin.add_css_class("row-action");
-        if pinned {
-            pin.add_css_class("suggested-action");
-            pin.set_tooltip_text(Some("Открепить файл"));
-        } else {
-            pin.set_tooltip_text(Some("Закрепить файл"));
-        }
-        let ctx = self.clone();
-        let watch = path.to_path_buf();
-        pin.connect_clicked(move |_| ctx.toggle_pin_file(&watch));
-        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        row.add_css_class("file-row");
-        row.set_tooltip_text(Some(&path.display().to_string()));
-        let icon = file_icon(path);
-        icon.set_can_target(false);
-        row.append(&icon);
-        row.append(&label);
-        row.append(&pin);
-        if closable {
-            let close = gtk4::Button::from_icon_name("window-close-symbolic");
-            close.add_css_class("flat");
-            close.add_css_class("row-action");
-            close.set_tooltip_text(Some("Закрыть файл"));
-            let ctx = self.clone();
-            let watch = path.to_path_buf();
-            close.connect_clicked(move |_| ctx.close_file(&watch));
-            row.append(&close);
-        }
-        row
     }
 
     fn toggle_pin_file(&self, path: &Path) {
