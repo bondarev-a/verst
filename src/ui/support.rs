@@ -42,31 +42,6 @@ entry.tw-md-cell * selection {
 }
 ";
 
-thread_local! {
-    static TABLE_CELL_PROVIDER: gtk4::CssProvider = {
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_string(TABLE_CELL_CSS);
-        provider
-    };
-}
-
-pub(super) fn bind_table_cell_css(widget: &impl IsA<gtk4::Widget>) {
-    TABLE_CELL_PROVIDER.with(|provider| {
-        bind_provider_tree(widget.upcast_ref(), provider);
-    });
-}
-
-fn bind_provider_tree(widget: &gtk4::Widget, provider: &gtk4::CssProvider) {
-    widget
-        .style_context()
-        .add_provider(provider, gtk4::STYLE_PROVIDER_PRIORITY_USER);
-    let mut child = widget.first_child();
-    while let Some(node) = child {
-        bind_provider_tree(&node, provider);
-        child = node.next_sibling();
-    }
-}
-
 pub(super) const CHROME_CSS: &str = "
 /* Один стиль: радиус 10 у кнопок, 12 у панелей, акцент темы у выбора. */
 window.verst {

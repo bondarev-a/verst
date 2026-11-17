@@ -12,7 +12,7 @@ use text_workspace::session::ViewMode;
 use text_workspace::tables::{self, ColAlign, MdTable};
 use text_workspace::zoom;
 
-use super::support::{bind_table_cell_css, buffer_text_of, is_markdown, menu_row, scrolled_of};
+use super::support::{buffer_text_of, is_markdown, menu_row, scrolled_of};
 use super::{Ctx, State, PREVIEW_MS};
 
 fn display_line_number_of(state: &State, buffer_line: i32) -> Option<i32> {
@@ -1858,7 +1858,6 @@ fn build_table_grid(
     grid.set_hexpand(true);
     grid.set_halign(gtk4::Align::Fill);
     grid.set_can_target(true);
-    bind_table_cell_css(&grid);
 
     let rows = table.row_count();
     let cols = table.column_count();
@@ -1880,10 +1879,6 @@ fn build_table_grid(
             if row == 0 {
                 entry.add_css_class("tw-md-cell-head");
             }
-            bind_table_cell_css(&entry);
-            entry.connect_realize(|entry| {
-                bind_table_cell_css(entry);
-            });
             match table.alignments.get(col).copied().unwrap_or(ColAlign::None) {
                 ColAlign::Left | ColAlign::None => {
                     gtk4::prelude::EditableExt::set_alignment(&entry, 0.0);
@@ -1948,7 +1943,6 @@ fn build_table_grid(
             overlay.set_halign(gtk4::Align::Fill);
             overlay.set_child(Some(&entry));
             overlay.add_overlay(&bar);
-            bind_table_cell_css(&overlay);
             grid.attach(&overlay, col as i32, row as i32, 1, 1);
         }
     }
