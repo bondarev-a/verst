@@ -6,6 +6,8 @@
 
 Границы продукта — в [requirements.md](./requirements.md). Что вошло в каждую версию — в [release_notes.md](./release_notes.md) и в [релизах](https://github.com/bondarev-a/verst/releases).
 
+Код под GNU GPL версии 3 или любой более поздней: программу можно копировать, менять и развивать своей версией, если изменения остаются под той же лицензией. Текст — в [LICENSE](./LICENSE). Copyright (C) 2026 alex.
+
 ## Установка на Ubuntu
 
 Нужна Ubuntu 24.04 или новее, архитектура amd64. На машину, куда ставят уже собранный пакет, Rust не нужен. Пакет зависит от `libgtk-4-1`, `libgtksourceview-5-0`, `libwebkitgtk-6.0-4`, `bubblewrap`, `xdg-dbus-proxy` и AppArmor. На Ubuntu 22.04 этих библиотек нет.
