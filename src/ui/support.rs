@@ -59,6 +59,16 @@ window.verst menubar {
     padding: 0 10px 6px 10px;
     border-bottom: 1px solid alpha(@theme_fg_color, 0.08);
 }
+/* Меню стоит в заголовке окна: без своей полосы и разделителя. */
+window.verst headerbar menubar {
+    background: transparent;
+    border-bottom: none;
+    box-shadow: none;
+}
+window.verst headerbar .title-path {
+    font-family: monospace;
+    font-size: 0.9em;
+}
 window.verst menubar > item,
 window.verst menubar item button {
     border-radius: 999px;

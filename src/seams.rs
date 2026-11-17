@@ -145,6 +145,30 @@ const COMMANDS: &[CommandSpec] = &[
         accels: &[],
     },
     CommandSpec {
+        id: "toggle_view",
+        title: "Редактирование или просмотр",
+        section: "Вид",
+        accels: &["<Control>e"],
+    },
+    CommandSpec {
+        id: "show_open",
+        title: "Открытые файлы",
+        section: "Вид",
+        accels: &[],
+    },
+    CommandSpec {
+        id: "next_open",
+        title: "Следующий открытый файл",
+        section: "Вид",
+        accels: &["<Control>Page_Down", "<Control>Tab"],
+    },
+    CommandSpec {
+        id: "prev_open",
+        title: "Предыдущий открытый файл",
+        section: "Вид",
+        accels: &["<Control>Page_Up", "<Control><Shift>ISO_Left_Tab"],
+    },
+    CommandSpec {
         id: "word_wrap",
         title: "Перенос строк",
         section: "Вид",
@@ -228,6 +252,11 @@ const COMMANDS: &[CommandSpec] = &[
 
 const PANELS: &[PanelSpec] = &[
     PanelSpec {
+        id: "open",
+        title: "Открытые",
+        side: PanelSide::Left,
+    },
+    PanelSpec {
         id: "disk",
         title: "Проводник",
         side: PanelSide::Left,
@@ -283,6 +312,7 @@ pub fn panel_icon(id: &str) -> &'static str {
         "disk" => "system-file-manager-symbolic",
         "notes" => "document-edit-symbolic",
         "history" => "document-open-recent-symbolic",
+        "open" => "view-list-symbolic",
         _ => "image-missing-symbolic",
     }
 }
@@ -293,6 +323,7 @@ pub fn panel_hint(id: &str) -> &'static str {
         "workspace" => "Пространства. Запиненные каталоги",
         "notes" => "Заметки. Быстрые заметки вне пространства",
         "history" => "История. Недавно открытые файлы и запросы к AI",
+        "open" => "Открытые файлы",
         _ => "",
     }
 }
@@ -334,6 +365,9 @@ pub fn panel_index(id: &str) -> Option<u32> {
         .map(|index| index as u32)
 }
 
+/// Порядок левых вкладок, когда сессия хранила только номер.
+const LEGACY_LEFT: &[&str] = &["disk", "workspace", "notes", "history"];
+
 pub fn canonical_panel(side: PanelSide, id: &str, legacy_page: u32) -> String {
     if panels()
         .iter()
@@ -341,8 +375,19 @@ pub fn canonical_panel(side: PanelSide, id: &str, legacy_page: u32) -> String {
     {
         return id.to_string();
     }
-    panel_id(side, legacy_page)
-        .or_else(|| panel_id(side, 0))
+    // Старые сессии хранили только номер вкладки, в порядке до появления
+    // панели «Открытые». Номер читается по тому порядку.
+    let legacy = match side {
+        PanelSide::Left => LEGACY_LEFT.get(legacy_page as usize).copied(),
+        PanelSide::Right => panel_id(side, legacy_page),
+    };
+    // Неизвестный номер — как раньше: «Проводник» слева, первая вкладка справа.
+    let fallback = match side {
+        PanelSide::Left => Some("disk"),
+        PanelSide::Right => panel_id(side, 0),
+    };
+    legacy
+        .or(fallback)
         .unwrap_or(if side == PanelSide::Left {
             "disk"
         } else {
@@ -378,16 +423,18 @@ mod tests {
             .accels
             .iter()
             .any(|a| a.contains("<Control><Shift>minus")));
-        assert_eq!(panel_index("notes"), Some(2));
-        assert_eq!(panel_index("history"), Some(3));
-        assert_eq!(panel_id(PanelSide::Left, 0), Some("disk"));
-        assert_eq!(panel_id(PanelSide::Left, 1), Some("workspace"));
-        assert_eq!(panel_id(PanelSide::Left, 2), Some("notes"));
-        assert_eq!(panel_id(PanelSide::Left, 3), Some("history"));
+        assert_eq!(panel_index("notes"), Some(3));
+        assert_eq!(panel_index("history"), Some(4));
+        assert_eq!(panel_id(PanelSide::Left, 0), Some("open"));
+        assert_eq!(panel_id(PanelSide::Left, 1), Some("disk"));
+        assert_eq!(panel_id(PanelSide::Left, 2), Some("workspace"));
+        assert_eq!(panel_id(PanelSide::Left, 3), Some("notes"));
+        assert_eq!(panel_id(PanelSide::Left, 4), Some("history"));
         assert_eq!(canonical_panel(PanelSide::Left, "", 3), "history");
         assert_eq!(panel_hint("disk"), "Проводник. Каталоги и файлы на диске");
         assert!(!panel_hint("notes").is_empty());
-        assert_eq!(canonical_panel(PanelSide::Left, "open", 0), "disk");
+        assert_eq!(canonical_panel(PanelSide::Left, "open", 0), "open");
+        assert_eq!(canonical_panel(PanelSide::Left, "", 0), "disk");
         assert_eq!(canonical_panel(PanelSide::Right, "nope", 9), "outline");
         let order = ordered_ids(
             PanelSide::Left,
@@ -398,7 +445,7 @@ mod tests {
             ],
         );
         assert_eq!(order[0], "notes");
-        assert_eq!(order.len(), 4);
+        assert_eq!(order.len(), 5);
         assert_eq!(panel_icon("disk"), "system-file-manager-symbolic");
         assert_eq!(panel_icon("notes"), "document-edit-symbolic");
         assert!(!panel_icon("workspace").is_empty());

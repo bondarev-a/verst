@@ -75,6 +75,20 @@ fn fill_outline(list: &gtk4::ListBox, headings: &[markdown::Heading]) {
     }
 }
 
+/// Каталог для заголовка: домашний каталог как `~`.
+fn short_dir(dir: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Ok(rest) = dir.strip_prefix(&home) {
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            };
+        }
+    }
+    dir.display().to_string()
+}
+
 fn fact_row(title: &str, value: &str) -> gtk4::Box {
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let name = gtk4::Label::new(Some(title));
@@ -228,8 +242,10 @@ pub(super) struct State {
 #[derive(Clone)]
 struct Widgets {
     window: gtk4::ApplicationWindow,
-    pins_box: gtk4::Box,
+    open_list: gtk4::ListBox,
     open_mode_dropdown: gtk4::DropDown,
+    view_toggle: gtk4::Button,
+    title_name: gtk4::Label,
     bar_zoom_spin: gtk4::SpinButton,
     bar_text_spin: gtk4::SpinButton,
     workspace_slot: gtk4::Box,
@@ -524,9 +540,15 @@ impl Ctx {
         notes_page.append(&notes_hint);
         notes_page.append(&notes_tags_fold);
         notes_page.append(&scrolled(&notes_host));
+        // «Открытые файлы» — отдельная панель слева вместо полосы над окном.
+        let open_list = gtk4::ListBox::new();
+        open_list.add_css_class("navigation-sidebar");
+        open_list.add_css_class("file-list");
+        open_list.set_selection_mode(gtk4::SelectionMode::Single);
         let left = notebook_for(
             seams::PanelSide::Left,
             &[
+                ("open", scrolled(&open_list).upcast()),
                 ("disk", disk_placeholder.upcast()),
                 ("workspace", workspace_slot.clone().upcast()),
                 ("notes", notes_page.upcast()),
@@ -838,52 +860,55 @@ impl Ctx {
         main.set_overflow(gtk4::Overflow::Hidden);
         main.add_css_class("workspace-main");
 
-        let pin_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        pin_box.add_css_class("pinbar");
-        let pins_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        pins_box.set_halign(gtk4::Align::Start);
-        let open_caption = gtk4::Label::new(Some("Открытые файлы"));
-        open_caption.add_css_class("dim-label");
-        open_caption.set_margin_end(4);
-        let pins_scroll = gtk4::ScrolledWindow::new();
-        pins_scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Never);
-        pins_scroll.set_hexpand(true);
-        pins_scroll.set_propagate_natural_height(true);
-        pins_scroll.set_child(Some(&pins_box));
+        // Вид файла переключает кнопка в заголовке. Выпадающий список остаётся
+        // моделью выбора, но на экран не выводится.
         let open_mode_dropdown = gtk4::DropDown::from_strings(&["Редактирование", "Просмотр"]);
         open_mode_dropdown.set_selected(mode_dropdown_index(session.open_mode));
-        open_mode_dropdown
-            .set_tooltip_text(Some("Вид текущего файла: редактирование или просмотр"));
-        let open_mode_label = gtk4::Label::new(Some("Вид"));
-        open_mode_label.add_css_class("dim-label");
+        let view_toggle = gtk4::Button::from_icon_name("view-reveal-symbolic");
+        view_toggle.add_css_class("flat");
+        view_toggle.set_tooltip_text(Some("Просмотр (Ctrl+E)"));
         let bar_zoom_spin =
             zoom_bar_spin(session.zoom_pt, "Масштаб окна. Клавиши Ctrl++ и Ctrl+−.");
         let bar_text_spin = zoom_bar_spin(
             session.text_pt,
             "Масштаб текста. Клавиши Ctrl+Shift++ и Ctrl+Shift+−.",
         );
+        // Масштаб окна и текста — в поповере кнопки «Aa».
+        let zoom_grid = gtk4::Grid::new();
+        zoom_grid.set_row_spacing(6);
+        zoom_grid.set_column_spacing(8);
+        zoom_grid.set_margin_top(6);
+        zoom_grid.set_margin_bottom(6);
+        zoom_grid.set_margin_start(6);
+        zoom_grid.set_margin_end(6);
         let zoom_window_label = gtk4::Label::new(Some("Окно"));
-        zoom_window_label.add_css_class("dim-label");
+        zoom_window_label.set_halign(gtk4::Align::Start);
         let zoom_text_label = gtk4::Label::new(Some("Текст"));
-        zoom_text_label.add_css_class("dim-label");
-        let open_mode_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        open_mode_box.set_halign(gtk4::Align::End);
-        open_mode_box.set_valign(gtk4::Align::Center);
-        open_mode_box.append(&open_mode_label);
-        open_mode_box.append(&open_mode_dropdown);
-        open_mode_box.append(&zoom_window_label);
-        open_mode_box.append(&bar_zoom_spin);
-        open_mode_box.append(&zoom_text_label);
-        open_mode_box.append(&bar_text_spin);
-        pin_box.append(&open_caption);
-        pin_box.append(&pins_scroll);
-        pin_box.append(&open_mode_box);
+        zoom_text_label.set_halign(gtk4::Align::Start);
+        zoom_grid.attach(&zoom_window_label, 0, 0, 1, 1);
+        zoom_grid.attach(&bar_zoom_spin, 1, 0, 1, 1);
+        zoom_grid.attach(&zoom_text_label, 0, 1, 1, 1);
+        zoom_grid.attach(&bar_text_spin, 1, 1, 1, 1);
+        let zoom_popover = gtk4::Popover::new();
+        zoom_popover.set_child(Some(&zoom_grid));
+        let zoom_button = gtk4::MenuButton::new();
+        zoom_button.set_label("Aa");
+        zoom_button.add_css_class("flat");
+        zoom_button.set_popover(Some(&zoom_popover));
+        zoom_button.set_tooltip_text(Some("Масштаб окна и текста"));
+        // Имя файла и путь — заголовок окна.
+        let title_name = gtk4::Label::new(Some(APP_TITLE));
+        title_name.add_css_class("title");
+        title_name.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        title_name.set_max_width_chars(36);
         let path_label = gtk4::Label::new(None);
-        path_label.set_halign(gtk4::Align::Start);
-        path_label.set_hexpand(true);
         path_label.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
-        path_label.set_margin_start(8);
-        path_label.add_css_class("path-label");
+        path_label.set_max_width_chars(48);
+        path_label.add_css_class("dim-label");
+        path_label.add_css_class("title-path");
+        let title_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        title_box.append(&title_name);
+        title_box.append(&path_label);
         let back_button = gtk4::Button::from_icon_name("go-previous-symbolic");
         back_button.add_css_class("flat");
         back_button.set_tooltip_text(Some("Назад: файл, ссылка или каталог"));
@@ -896,17 +921,9 @@ impl Ctx {
         pin_file_button.add_css_class("flat");
         pin_file_button.set_tooltip_text(Some("Закрепить открытый файл"));
         pin_file_button.set_sensitive(false);
-        let catalog_button = gtk4::Button::with_label("Каталог");
+        let catalog_button = gtk4::Button::from_icon_name("folder-open-symbolic");
         catalog_button.add_css_class("flat");
         catalog_button.set_tooltip_text(Some("Каталог открытого файла"));
-        catalog_button.set_margin_end(4);
-        let path_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        path_row.add_css_class("pathbar");
-        path_row.append(&back_button);
-        path_row.append(&forward_button);
-        path_row.append(&path_label);
-        path_row.append(&pin_file_button);
-        path_row.append(&catalog_button);
         let status = gtk4::Label::new(Some(""));
         status.set_halign(gtk4::Align::Start);
         status.add_css_class("dim-label");
@@ -917,15 +934,22 @@ impl Ctx {
         file_column.set_hexpand(true);
         file_column.set_vexpand(true);
         right_paned.set_start_child(None::<&gtk4::Widget>);
-        file_column.append(&path_row);
         file_column.append(&content);
         right_paned.set_start_child(Some(&file_column));
         let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        root.append(&pin_box);
         root.append(&main);
         root.append(&status);
 
+        // Одна строка: меню, переходы, имя файла с путём, кнопки файла.
         let header = gtk4::HeaderBar::new();
+        header.pack_start(&menubar);
+        header.pack_start(&back_button);
+        header.pack_start(&forward_button);
+        header.set_title_widget(Some(&title_box));
+        header.pack_end(&zoom_button);
+        header.pack_end(&catalog_button);
+        header.pack_end(&pin_file_button);
+        header.pack_end(&view_toggle);
         let (window_width, window_height) =
             fitted_size(session.window_width, session.window_height);
         let window = gtk4::ApplicationWindow::builder()
@@ -935,7 +959,7 @@ impl Ctx {
             .default_height(window_height)
             .child(&root)
             .titlebar(&header)
-            .show_menubar(true) // единственная строка «Файл / Правка / Вид», в заголовке окна
+            .show_menubar(false) // меню «Файл / Правка / Вид» стоит в заголовке окна
             .build();
         window.add_css_class("verst");
         window.set_size_request(session::MIN_WINDOW_WIDTH, session::MIN_WINDOW_HEIGHT);
@@ -970,8 +994,10 @@ impl Ctx {
 
         let widgets = Widgets {
             window,
-            pins_box,
+            open_list,
             open_mode_dropdown,
+            view_toggle,
+            title_name,
             bar_zoom_spin,
             bar_text_spin,
             workspace_slot,
@@ -1180,6 +1206,10 @@ impl Ctx {
         self.action(app, "forward", |ctx| ctx.shift_history(false));
         self.action(app, "show_history", |ctx| ctx.show_panel("history"));
         self.action(app, "split", |ctx| ctx.toggle_split());
+        self.action(app, "toggle_view", |ctx| ctx.toggle_view_mode());
+        self.action(app, "show_open", |ctx| ctx.show_panel("open"));
+        self.action(app, "next_open", |ctx| ctx.cycle_open(true));
+        self.action(app, "prev_open", |ctx| ctx.cycle_open(false));
         let ctx = self.clone();
         let word_wrap = gio::SimpleAction::new_stateful(
             "word_wrap",
@@ -1656,7 +1686,14 @@ impl Ctx {
             }
         });
         let ctx = self.clone();
-        self.widgets.menubar.set_visible(false);
+        self.widgets
+            .view_toggle
+            .connect_clicked(move |_| ctx.toggle_view_mode());
+        let ctx = self.clone();
+        self.widgets
+            .open_list
+            .connect_row_activated(move |_, row| ctx.activate_open_row(row));
+        let ctx = self.clone();
         self.widgets.catalog_button.connect_clicked(move |button| {
             ctx.show_catalog_menu(button);
         });
@@ -2530,7 +2567,11 @@ impl Ctx {
         match &path {
             Some(path) => {
                 let shown = path.display().to_string();
-                self.widgets.path_label.set_text(&shown);
+                self.widgets.title_name.set_text(&file_label(path));
+                self.widgets.title_name.set_tooltip_text(Some(&shown));
+                self.widgets
+                    .path_label
+                    .set_text(&short_dir(path.parent().unwrap_or(path)));
                 self.widgets.path_label.set_tooltip_text(Some(&shown));
                 self.widgets
                     .window
@@ -2541,6 +2582,8 @@ impl Ctx {
                     .set_tooltip_text(Some(&path.display().to_string()));
             }
             None => {
+                self.widgets.title_name.set_text(APP_TITLE);
+                self.widgets.title_name.set_tooltip_text(None);
                 self.widgets.path_label.set_text("");
                 self.widgets.path_label.set_tooltip_text(None);
                 self.widgets.window.set_title(Some(APP_TITLE));
@@ -2815,10 +2858,20 @@ impl Ctx {
     }
 
     fn sync_view_dropdown(&self) {
-        let index = mode_dropdown_index(self.state.borrow().view_mode);
+        let mode = self.state.borrow().view_mode;
+        let index = mode_dropdown_index(mode);
         if self.widgets.open_mode_dropdown.selected() != index {
             self.widgets.open_mode_dropdown.set_selected(index);
         }
+        let path = self.focused_path();
+        let switchable = path.as_deref().is_some_and(|path| !kind::is_view_only(path));
+        let (icon, tip) = match mode {
+            ViewMode::Edit => ("view-reveal-symbolic", "Просмотр (Ctrl+E)"),
+            ViewMode::Preview => ("document-edit-symbolic", "Редактирование (Ctrl+E)"),
+        };
+        self.widgets.view_toggle.set_icon_name(icon);
+        self.widgets.view_toggle.set_tooltip_text(Some(tip));
+        self.widgets.view_toggle.set_sensitive(switchable);
     }
 
     fn show_catalog_menu(&self, anchor: &gtk4::Button) {

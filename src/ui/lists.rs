@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use gtk4::prelude::*;
 use text_workspace::places;
 
-use super::support::{clear_box, clear_list, dim_row, file_icon, file_label};
+use super::support::{clear_list, dim_row, file_icon, file_label};
 use super::Ctx;
 
 const CURRENT: &str = "suggested-action";
 
 struct OpenChip {
     path: PathBuf,
-    button: gtk4::Button,
+    row: gtk4::ListBoxRow,
     label: gtk4::Label,
 }
 
@@ -62,7 +62,7 @@ impl Ctx {
             let state = self.state.borrow();
             let files = &state.session.open_files;
             let chips = &state.lists.chips;
-            // Полоса показывает файлы от новых к старым.
+            // Список показывает файлы от новых к старым.
             files.len() == chips.len()
                 && files.iter().rev().zip(chips).all(|(path, chip)| *path == chip.path)
         };
@@ -74,66 +74,110 @@ impl Ctx {
 
     fn mark_open_chips(&self) {
         let focused = self.focused_path();
-        let marks: Vec<(gtk4::Button, gtk4::Label, PathBuf)> = self
+        let marks: Vec<(gtk4::ListBoxRow, gtk4::Label, PathBuf)> = self
             .state
             .borrow()
             .lists
             .chips
             .iter()
-            .map(|chip| (chip.button.clone(), chip.label.clone(), chip.path.clone()))
+            .map(|chip| (chip.row.clone(), chip.label.clone(), chip.path.clone()))
             .collect();
-        for (button, label, path) in marks {
-            set_class(&button, CURRENT, focused.as_ref() == Some(&path));
+        let list = &self.widgets.open_list;
+        let mut current = None;
+        for (row, label, path) in marks {
+            if focused.as_ref() == Some(&path) {
+                current = Some(row);
+            }
             set_label(&label, &self.title_of(&path));
+        }
+        match current {
+            Some(row) => {
+                if !row.is_selected() {
+                    list.select_row(Some(&row));
+                }
+            }
+            None => list.unselect_all(),
         }
     }
 
     pub(super) fn rebuild_pins(&self) {
         let _prof = crate::ui::prof::span("rebuild_pins");
-        clear_box(&self.widgets.pins_box);
+        clear_list(&self.widgets.open_list);
         self.state.borrow_mut().lists.chips.clear();
         let files = self.state.borrow().session.open_files.clone();
         if files.is_empty() {
-            let hint = gtk4::Label::new(Some("Нет открытых файлов"));
-            hint.add_css_class("dim-label");
-            hint.set_margin_start(4);
-            self.widgets.pins_box.append(&hint);
+            self.widgets.open_list.append(&dim_row("Нет открытых файлов"));
             return;
         }
         let mut chips = Vec::with_capacity(files.len());
         for path in files.iter().rev() {
             let label = gtk4::Label::new(Some(&self.title_of(path)));
+            label.set_halign(gtk4::Align::Start);
+            label.set_hexpand(true);
             label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            label.set_max_width_chars(28);
             label.set_can_target(false);
-            let button = gtk4::Button::new();
-            button.set_child(Some(&label));
-            button.add_css_class("pin-name");
-            button.set_tooltip_text(Some(&path.display().to_string()));
-            let ctx = self.clone();
-            let open_path = path.clone();
-            button.connect_clicked(move |_| ctx.go(open_path.clone(), None));
             let close = gtk4::Button::from_icon_name("window-close-symbolic");
             close.add_css_class("flat");
-            close.add_css_class("pin-close");
+            close.add_css_class("row-action");
             close.set_tooltip_text(Some("Закрыть файл"));
             let ctx = self.clone();
             let close_path = path.clone();
             close.connect_clicked(move |_| ctx.close_file(&close_path));
-            close.set_has_frame(false);
-            close.set_valign(gtk4::Align::Center);
-            let group = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
-            group.add_css_class("open-chip");
-            group.append(&button);
-            group.append(&close);
-            self.widgets.pins_box.append(&group);
+            let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+            line.add_css_class("file-row");
+            line.set_tooltip_text(Some(&path.display().to_string()));
+            let icon = file_icon(path);
+            icon.set_can_target(false);
+            line.append(&icon);
+            line.append(&label);
+            line.append(&close);
+            let row = gtk4::ListBoxRow::new();
+            row.set_child(Some(&line));
+            self.widgets.open_list.append(&row);
             chips.push(OpenChip {
                 path: path.clone(),
-                button,
+                row,
                 label,
             });
         }
         self.state.borrow_mut().lists.chips = chips;
+    }
+
+    pub(super) fn activate_open_row(&self, row: &gtk4::ListBoxRow) {
+        let path = self
+            .state
+            .borrow()
+            .lists
+            .chips
+            .iter()
+            .find(|chip| &chip.row == row)
+            .map(|chip| chip.path.clone());
+        if let Some(path) = path {
+            self.go(path, None);
+        }
+    }
+
+    /// Следующий или предыдущий файл в порядке списка «Открытые».
+    pub(super) fn cycle_open(&self, forward: bool) {
+        let order: Vec<PathBuf> = self
+            .state
+            .borrow()
+            .lists
+            .chips
+            .iter()
+            .map(|chip| chip.path.clone())
+            .collect();
+        if order.len() < 2 {
+            return;
+        }
+        let focused = self.focused_path();
+        let at = order.iter().position(|path| Some(path) == focused.as_ref());
+        let next = match (at, forward) {
+            (Some(i), true) => (i + 1) % order.len(),
+            (Some(i), false) => (i + order.len() - 1) % order.len(),
+            (None, _) => 0,
+        };
+        self.go(order[next].clone(), None);
     }
 
     fn sync_history_rows(&self) {
@@ -281,7 +325,7 @@ impl Ctx {
             .lists
             .chips
             .iter()
-            .filter(|c| c.button.has_css_class(CURRENT))
+            .filter(|c| c.row.is_selected())
             .map(|c| &c.path)
             .collect();
         if lit.len() != 1 || Some(lit[0]) != focused.as_ref() {

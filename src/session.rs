@@ -301,9 +301,6 @@ impl Session {
         if self.theme.is_empty() {
             self.theme = default_theme();
         }
-        if self.left_panel == "open" {
-            self.left_panel = "workspace".to_string();
-        }
         self.left_panel = seams::canonical_panel(PanelSide::Left, &self.left_panel, self.left_page);
         self.right_panel =
             seams::canonical_panel(PanelSide::Right, &self.right_panel, self.right_page);
@@ -545,7 +542,7 @@ mod tests {
         assert!(session.info_open && session.info_pinned);
         assert_eq!(
             session.left_order,
-            ["disk", "workspace", "notes", "history"]
+            ["open", "disk", "workspace", "notes", "history"]
         );
         assert_eq!(session.nav_width, 280);
         let session = Session::from_json(r#"{"word_wrap":true}"#).unwrap();
@@ -556,12 +553,14 @@ mod tests {
     fn history_page_is_kept() {
         let session = Session::from_json(r#"{"left_page":3}"#).unwrap();
         assert_eq!(session.left_panel, "history");
-        assert_eq!(session.left_page, 3);
+        // Номер вкладки теперь считается в порядке с панелью «Открытые» первой.
+        assert_eq!(session.left_page, 4);
         let session = Session::from_json(r#"{"left_page":9}"#).unwrap();
         assert_eq!(session.left_panel, "disk");
+        // «Открытые» снова отдельная панель слева.
         let session = Session::from_json(r#"{"left_panel":"open","left_page":0}"#).unwrap();
-        assert_eq!(session.left_panel, "workspace");
-        assert_eq!(session.left_page, 1);
+        assert_eq!(session.left_panel, "open");
+        assert_eq!(session.left_page, 0);
     }
 
     #[test]
