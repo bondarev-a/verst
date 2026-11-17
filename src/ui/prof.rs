@@ -194,6 +194,7 @@ enum Step {
     CursorShot,
     TableLeave(std::path::PathBuf),
     LinkEdit(std::path::PathBuf, u8),
+    Action(String),
     Quit,
 }
 
@@ -217,6 +218,11 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(path, 0));
             steps.push(Step::Scroll);
             steps.push(Step::Report("scroll".to_string()));
+        }
+    }
+    if let Ok(actions) = std::env::var("VERST_BENCH_ACTIONS") {
+        for name in actions.split(',').filter(|n| !n.is_empty()) {
+            steps.push(Step::Action(name.to_string()));
         }
     }
     if let Some(pair) = std::env::var_os("VERST_BENCH_LINKS") {
@@ -318,6 +324,27 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             take_totals();
             reset_stall();
             scroll_stress(ctx, steps, 0, 0);
+        }
+        Step::Action(name) => {
+            let before = ctx.focused_path();
+            if let Some(app) = ctx.widgets.window.application() {
+                gtk4::gio::prelude::ActionGroupExt::activate_action(&app, &name, None);
+            }
+            glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                let label = |p: Option<std::path::PathBuf>| {
+                    p.and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_default()
+                };
+                eprintln!(
+                    "PROF action {name}: {} -> {} | mode {} | toggle {} | lists {}",
+                    label(before),
+                    label(ctx.focused_path()),
+                    ctx.state.borrow().view_mode.as_str(),
+                    ctx.widgets.view_toggle.icon_name().unwrap_or_default(),
+                    ctx.lists_report()
+                );
+                run_steps(ctx, steps);
+            });
         }
         Step::LinkEdit(probe, stage) => {
             let name = probe
@@ -473,12 +500,21 @@ fn shoot(ctx: &Ctx, name: &str) -> bool {
         return true;
     };
     let window = &ctx.widgets.window;
-    let Some(root) = window.child() else {
-        return false;
+    // Всё окно, вместе с заголовком: VERST_SHOT_ROOT=1 снимает только содержимое.
+    let target: gtk4::Widget = if std::env::var_os("VERST_SHOT_ROOT").is_some() {
+        let Some(root) = window.child() else {
+            return false;
+        };
+        root
+    } else {
+        window.clone().upcast()
     };
-    let width = root.width();
-    let height = root.height();
-    let paintable = gtk4::WidgetPaintable::new(Some(&root));
+    let width = target.width();
+    let height = target.height();
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    let paintable = gtk4::WidgetPaintable::new(Some(&target));
     let snapshot = gtk4::Snapshot::new();
     gtk4::gdk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(width), f64::from(height));
     let Some(node) = snapshot.to_node() else {
