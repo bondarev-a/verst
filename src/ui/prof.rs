@@ -173,11 +173,18 @@ fn hook_first_paint(clock: &gtk4::gdk::FrameClock) {
     let handler: std::rc::Rc<RefCell<Option<glib::SignalHandlerId>>> = Default::default();
     let slot = handler.clone();
     let id = clock.connect_after_paint(move |clock| {
+        let (main_cpu, all_cpu, threads) = cpu_times_ms();
         eprintln!(
-            "PROF first_paint {:.1} ms since main, epoch_ms {}",
+            "PROF first_paint {:.1} ms since main, epoch_ms {}, cpu_main {:.1} ms, cpu_all {:.1} ms, threads {}",
             since_main_ms(),
-            epoch_ms()
+            epoch_ms(),
+            main_cpu,
+            all_cpu,
+            threads
         );
+        if std::env::var_os("VERST_EXIT_AFTER_PAINT").is_some() {
+            std::process::exit(0);
+        }
         if let Some(id) = slot.borrow_mut().take() {
             clock.disconnect(id);
         }
@@ -576,4 +583,25 @@ fn scroll_stress(ctx: Ctx, steps: Vec<Step>, tick: u32, line: i32) {
     glib::timeout_add_local_once(Duration::from_millis(12), move || {
         scroll_stress(ctx, steps, tick + 1, next);
     });
+}
+
+/// Время на процессоре: главный поток и все потоки процесса, в мс (/proc/.../schedstat).
+fn cpu_times_ms() -> (f64, f64, usize) {
+    let read = |path: &std::path::Path| -> f64 {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.split_whitespace().next().and_then(|n| n.parse::<f64>().ok()))
+            .map(|ns| ns / 1e6)
+            .unwrap_or(0.0)
+    };
+    let main = read(std::path::Path::new("/proc/thread-self/schedstat"));
+    let mut all = 0.0;
+    let mut threads = 0;
+    if let Ok(dir) = std::fs::read_dir("/proc/self/task") {
+        for entry in dir.flatten() {
+            all += read(&entry.path().join("schedstat"));
+            threads += 1;
+        }
+    }
+    (main, all, threads)
 }
