@@ -2506,6 +2506,8 @@ impl Ctx {
             self.widgets.editor_paned.set_position(10_000);
             self.state.borrow_mut().session.focused_pane = 0;
         }
+        // Сетки таблиц второй панели строятся только при разделённом окне.
+        self.rebuild_render();
         self.save_session();
         self.set_status(if split {
             "Вторая панель открыта"

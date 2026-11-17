@@ -85,7 +85,8 @@ struct LiveTable {
     start_line: i32,
     end_line: i32,
     anchor: gtk4::TextChildAnchor,
-    grids: [gtk4::Grid; 2],
+    /// Сетка для каждой панели. Вторая строится, только когда окно разделено.
+    grids: [Option<gtk4::Grid>; 2],
     focus_cell: Rc<RefCell<Option<(usize, usize)>>>,
 }
 
@@ -296,6 +297,21 @@ impl Ctx {
         }
     }
 
+    /// Для замеров: таблиц, сеток второй панели, из них показанных.
+    pub(super) fn table_grid_report(&self) -> (usize, usize, usize) {
+        let state = self.state.borrow();
+        let tables = &state.render.tables;
+        let second: Vec<_> = tables.iter().filter_map(|t| t.grids[1].clone()).collect();
+        let mapped = second.iter().filter(|g| g.is_mapped()).count();
+        (tables.len(), second.len(), mapped)
+    }
+
+    /// Пересобрать таблицы и картинки с нуля, например после смены разделения окна.
+    pub(super) fn rebuild_render(&self) {
+        self.clear_render_layer();
+        self.refresh_render_now();
+    }
+
     pub(super) fn clear_render_layer(&self) {
         let (tables, images) = {
             let mut state = self.state.borrow_mut();
@@ -364,7 +380,7 @@ impl Ctx {
     fn drop_embeds(&self, tables: &[LiveTable], images: &[LiveImage]) {
     let _prof = crate::ui::prof::span("drop_embeds");
         for table in tables {
-            for grid in &table.grids {
+            for grid in table.grids.iter().flatten() {
                 detach_child(grid);
             }
         }
@@ -471,7 +487,7 @@ impl Ctx {
 
     pub(super) fn sync_table_grid_widths(&self) {
     let _prof = crate::ui::prof::span("sync_table_grid_widths");
-        let tables: Vec<[gtk4::Grid; 2]> = self
+        let tables: Vec<[Option<gtk4::Grid>; 2]> = self
             .state
             .borrow()
             .render
@@ -481,6 +497,9 @@ impl Ctx {
             .collect();
         for grids in tables {
             for (pane, grid) in grids.iter().enumerate() {
+                let Some(grid) = grid else {
+                    continue;
+                };
                 size_table_grid(grid, &self.widgets.views[pane]);
             }
         }
@@ -817,7 +836,7 @@ impl Ctx {
         let Some(live) = state.render.tables.iter().find(|item| item.index == table) else {
             return;
         };
-        for grid in &live.grids {
+        for grid in live.grids.iter().flatten() {
             if let Some(entry) = grid
                 .child_at(col as i32, row as i32)
                 .as_ref()
@@ -989,6 +1008,7 @@ impl Ctx {
             .iter()
             .find(|item| item.index == table)?;
         live.grids[pane]
+            .as_ref()?
             .child_at(col as i32, row as i32)
             .as_ref()
             .and_then(cell_entry_of)
@@ -996,7 +1016,7 @@ impl Ctx {
 
     fn paint_cell_active_class(&self) {
         let active = self.focused_table_cell();
-        let tables: Vec<[gtk4::Grid; 2]> = self
+        let tables: Vec<[Option<gtk4::Grid>; 2]> = self
             .state
             .borrow()
             .render
@@ -1013,7 +1033,7 @@ impl Ctx {
             .map(|table| table.index)
             .collect();
         for (grids, index) in tables.iter().zip(indices) {
-            for grid in grids {
+            for grid in grids.iter().flatten() {
                 let mut child = grid.first_child();
                 while let Some(widget) = child {
                     let next = widget.next_sibling();
@@ -1023,7 +1043,7 @@ impl Ctx {
             }
             if let Some((table, row, col)) = active {
                 if table == index {
-                    for grid in grids {
+                    for grid in grids.iter().flatten() {
                         if let Some(widget) = grid.child_at(col as i32, row as i32) {
                             mark_cell_active(&widget);
                         }
@@ -1065,7 +1085,7 @@ impl Ctx {
             .tables
             .iter()
             .find(|item| item.index == table)
-            .map(|item| item.grids[self.focused_index()].clone())
+            .and_then(|item| item.grids[self.focused_index()].clone())
         else {
             return glib::Propagation::Stop;
         };
@@ -1744,11 +1764,17 @@ impl Ctx {
         let anchor = buffer.create_child_anchor(&mut iter);
         lift_anchor_scale(buffer, &anchor);
         let focus_cell = Rc::new(RefCell::new(None));
+        // Скрытой второй панели сетка не нужна: каждая ячейка — это Entry,
+        // Overlay и три контроллера, а вторая копия удваивала их число.
+        let split = self.state.borrow().session.split;
         let grids = [
-            build_table_grid(self, path, table, index, focus_cell.clone()),
-            build_table_grid(self, path, table, index, focus_cell.clone()),
+            Some(build_table_grid(self, path, table, index, focus_cell.clone())),
+            split.then(|| build_table_grid(self, path, table, index, focus_cell.clone())),
         ];
         for (pane, grid) in grids.iter().enumerate() {
+            let Some(grid) = grid else {
+                continue;
+            };
             self.widgets.views[pane].add_child_at_anchor(grid, &anchor);
             size_table_grid(grid, &self.widgets.views[pane]);
         }
