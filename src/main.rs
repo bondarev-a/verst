@@ -7,8 +7,8 @@
 
 mod ui;
 
-use gtk4::prelude::*;
 use gtk4::gio;
+use gtk4::prelude::*;
 
 fn main() -> gtk4::glib::ExitCode {
     // Профиль AppArmor закрывает только /usr/bin/verst. Локальная копия

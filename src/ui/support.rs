@@ -1695,11 +1695,17 @@ pub(super) fn replace_notebook_page(
 }
 
 pub(super) fn file_icon(path: &Path) -> gtk4::Image {
-    let image = gtk4::Image::from_icon_name(if path.is_dir() {
-        "folder-symbolic"
-    } else {
-        "text-x-generic-symbolic"
-    });
+    let name = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg") => "image-x-generic-symbolic",
+        Some("pdf") => "x-office-document-symbolic",
+        _ => "text-x-generic-symbolic",
+    };
+    let image = gtk4::Image::from_icon_name(name);
     image.set_pixel_size(16);
     image
 }
@@ -1853,12 +1859,21 @@ pub(super) fn about_rows(
     text: Option<&str>,
     dirty: Option<bool>,
 ) -> Vec<(&'static str, String)> {
+    let meta = fs::metadata(path).ok();
     vec![
         ("Тип", type_label(path)),
-        ("Размер", size_of(path)),
+        (
+            "Размер",
+            meta.as_ref()
+                .map(|meta| format_size(meta.len()))
+                .unwrap_or_else(|| "—".to_string()),
+        ),
         ("Кодировка", encoding_label(path, text)),
-        ("Создан", time_of(path, TimeField::Created)),
-        ("Отредактирован", time_of(path, TimeField::Modified)),
+        ("Создан", time_from(meta.as_ref(), TimeField::Created)),
+        (
+            "Отредактирован",
+            time_from(meta.as_ref(), TimeField::Modified),
+        ),
         ("Строк", lines_label(text)),
         ("Правки", edits_label(dirty)),
     ]
@@ -1919,12 +1934,6 @@ fn ext_upper(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn size_of(path: &Path) -> String {
-    fs::metadata(path)
-        .map(|meta| format_size(meta.len()))
-        .unwrap_or_else(|_| "—".to_string())
-}
-
 fn encoding_label(path: &Path, text: Option<&str>) -> String {
     let Some(text) = text else {
         return "—".to_string();
@@ -1939,15 +1948,17 @@ fn encoding_label(path: &Path, text: Option<&str>) -> String {
     }
 }
 
-fn time_of(path: &Path, field: TimeField) -> String {
-    let Ok(meta) = fs::metadata(path) else {
+fn time_from(meta: Option<&fs::Metadata>, field: TimeField) -> String {
+    let Some(meta) = meta else {
         return "—".to_string();
     };
     let stamp = match field {
         TimeField::Created => meta.created().ok(),
         TimeField::Modified => meta.modified().ok(),
     };
-    stamp.map(format_system_time).unwrap_or_else(|| "—".to_string())
+    stamp
+        .map(format_system_time)
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn format_system_time(time: std::time::SystemTime) -> String {
@@ -2132,8 +2143,9 @@ mod tests {
         let path = dir.join("note.md");
         let body = "\u{feff}# Заголовок\nтекст\n";
         fs::write(&path, body).unwrap();
-        let rows: std::collections::HashMap<_, _> =
-            about_rows(&path, Some(body), Some(true)).into_iter().collect();
+        let rows: std::collections::HashMap<_, _> = about_rows(&path, Some(body), Some(true))
+            .into_iter()
+            .collect();
         assert_eq!(rows["Тип"], "Markdown");
         assert_eq!(rows["Кодировка"], "UTF-8 с BOM");
         assert_eq!(rows["Строк"], "2");

@@ -126,10 +126,7 @@ impl Ctx {
                 };
                 self.state.borrow_mut().view_mode = mode;
                 if let Some(path) = self.focused_path() {
-                    self.state
-                        .borrow_mut()
-                        .session
-                        .remember_mode(path, mode);
+                    self.state.borrow_mut().session.remember_mode(path, mode);
                 }
                 self.jump_to_line(line as usize);
                 self.apply_view_mode();
@@ -209,8 +206,7 @@ impl Ctx {
         if line == 0 && adj.value() > adj.page_size() {
             let upper = adj.upper().max(1.0);
             let ratio = (adj.value() / upper).clamp(0.0, 1.0);
-            let estimate =
-                ((buffer.line_count().max(1) as f64) * ratio).floor() as u32;
+            let estimate = ((buffer.line_count().max(1) as f64) * ratio).floor() as u32;
             return Some(estimate.max(1));
         }
         let next_top = buffer
@@ -235,7 +231,11 @@ impl Ctx {
         if line > 0 && top == 0 {
             return false;
         }
-        adj.set_value(scroll_top_for_line(top as f64, adj.page_size(), adj.upper()));
+        adj.set_value(scroll_top_for_line(
+            top as f64,
+            adj.page_size(),
+            adj.upper(),
+        ));
         true
     }
 
@@ -333,7 +333,12 @@ impl Ctx {
     }
 
     fn view_shows_path(&self, pane: usize, path: &Path) -> bool {
-        let Some(entry) = self.state.borrow().buffers.get(path).map(|entry| entry.buffer.clone())
+        let Some(entry) = self
+            .state
+            .borrow()
+            .buffers
+            .get(path)
+            .map(|entry| entry.buffer.clone())
         else {
             return false;
         };
@@ -457,12 +462,12 @@ impl Ctx {
             iter.forward_chars(col as i32);
         }
         buffer.place_cursor(&iter);
-        // use_align=false: только показать курсор. line_yrange сразу после
-        // set_buffer роняет GTK (кэш строк путает старый и новый буфер).
-        view.scroll_to_iter(&mut iter, 0.25, false, 0.0, 0.0);
         if focus {
             view.grab_focus();
         }
+        // Прокрутка в том же такте, что и set_buffer, роняет GTK: кэш строк
+        // ещё от старого буфера. Ждём показ поля и следующий такт.
+        scroll_view_later(view, line, col);
     }
 
     pub(super) fn focused_index(&self) -> usize {
@@ -629,4 +634,35 @@ impl Ctx {
             crumbs.append(&button);
         }
     }
+}
+
+fn scroll_view_later(view: &sourceview5::View, line: i32, column: u32) {
+    let queue = move |view: sourceview5::View| {
+        gtk4::glib::idle_add_local_once(move || {
+            if !view.is_realized() {
+                return;
+            }
+            let buffer = view.buffer();
+            let last = (buffer.line_count() - 1).max(0);
+            let line = line.clamp(0, last);
+            let Some(mut iter) = buffer.iter_at_line(line) else {
+                return;
+            };
+            let mut line_end = iter.clone();
+            if !line_end.ends_line() {
+                line_end.forward_to_line_end();
+            }
+            let max_col = line_end.line_offset().max(0) as u32;
+            let col = column.min(max_col);
+            if col > 0 {
+                iter.forward_chars(col as i32);
+            }
+            view.scroll_to_iter(&mut iter, 0.25, false, 0.0, 0.0);
+        });
+    };
+    if view.is_realized() {
+        queue(view.clone());
+        return;
+    }
+    view.connect_realize(move |view| queue(view.clone()));
 }

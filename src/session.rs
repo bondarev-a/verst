@@ -24,8 +24,6 @@ pub enum ViewMode {
     #[default]
     Edit,
     Preview,
-    /// Markdown на GtkSourceView с метками и сеткой таблиц.
-    Render,
 }
 
 impl ViewMode {
@@ -33,14 +31,13 @@ impl ViewMode {
         match self {
             Self::Edit => "edit",
             Self::Preview => "preview",
-            Self::Render => "render",
         }
     }
 
     pub fn parse(value: &str) -> Self {
         match value {
             "preview" => Self::Preview,
-            "render" => Self::Render,
+            // Раньше Markdown писал отдельный render. Это то же редактирование.
             _ => Self::Edit,
         }
     }
@@ -256,12 +253,10 @@ impl Session {
             Ok(text) => text,
             Err(_) => return Self::default(),
         };
-        Self::from_json(&text)
-            .map(|mut session| {
-                session.retain_present();
-                session
-            })
-            .unwrap_or_default()
+        // Метаданные здесь не читаем. Ошибка stat до окна стирала открытые
+        // файлы или держала старт, пока диск не ответит. Пропавшие пути
+        // снимает отдельный проход уже после показа окна.
+        Self::from_json(&text).unwrap_or_default()
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -366,21 +361,100 @@ impl Session {
     }
 
     pub fn retain_present(&mut self) {
-        self.pins.retain(|path| path.is_dir());
-        self.open_files.retain(|path| path.is_file());
+        self.pins.retain(|path| present_dir(path));
+        self.open_files.retain(|path| present_file(path));
         for pane in &mut self.pane_paths {
-            if pane.as_ref().is_some_and(|path| !path.is_file()) {
+            if pane.as_ref().is_some_and(|path| !present_file(path)) {
                 *pane = None;
             }
         }
-        self.carets.retain(|place| place.path.is_file());
-        self.file_modes.retain(|item| item.path.is_file());
-        self.pinned_files.retain(|path| path.is_file());
-        self.recent_files.retain(|path| path.is_file());
+        self.carets.retain(|place| present_file(&place.path));
+        self.file_modes.retain(|item| present_file(&item.path));
+        self.pinned_files.retain(|path| present_file(path));
+        self.recent_files.retain(|path| present_file(path));
         if self.active_pin.is_some_and(|i| i >= self.pins.len()) {
             self.active_pin = if self.pins.is_empty() { None } else { Some(0) };
         }
     }
+
+    /// Пути, которые точно пропали. Ошибка чтения метаданных сюда не попадает:
+    /// нет прав или диск не ответил — файл остаётся в сессии.
+    pub fn sweep_missing(&self) -> SessionSweep {
+        let mut kept = self.clone();
+        kept.retain_present();
+        let pins = self
+            .pins
+            .iter()
+            .filter(|path| !kept.pins.iter().any(|item| item == *path))
+            .cloned()
+            .collect();
+        let mut files = Vec::new();
+        let mut consider = |path: &Path| {
+            if files.iter().any(|item| item == path) {
+                return;
+            }
+            let still = kept.open_files.iter().any(|item| item == path)
+                || kept.pinned_files.iter().any(|item| item == path)
+                || kept.recent_files.iter().any(|item| item == path)
+                || kept.pane_paths.iter().flatten().any(|item| item == path)
+                || kept.carets.iter().any(|place| place.path == path)
+                || kept.file_modes.iter().any(|item| item.path == path);
+            if !still {
+                files.push(path.to_path_buf());
+            }
+        };
+        for path in &self.open_files {
+            consider(path);
+        }
+        for path in &self.pinned_files {
+            consider(path);
+        }
+        for path in &self.recent_files {
+            consider(path);
+        }
+        for path in self.pane_paths.iter().flatten() {
+            consider(path);
+        }
+        for place in &self.carets {
+            consider(&place.path);
+        }
+        for item in &self.file_modes {
+            consider(&item.path);
+        }
+        SessionSweep { pins, files }
+    }
+}
+
+/// Пути сессии, которых больше нет на диске.
+#[derive(Debug, Clone, Default)]
+pub struct SessionSweep {
+    pub pins: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
+}
+
+/// Файл остаётся, если его метаданные не прочитались. Снимаем только когда
+/// пути точно нет: так обновление и сетевой диск не обнуляют список.
+fn present_file(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => meta.is_file(),
+        Err(error) if path_is_gone(&error) => false,
+        Err(_) => true,
+    }
+}
+
+fn present_dir(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(error) if path_is_gone(&error) => false,
+        Err(_) => true,
+    }
+}
+
+fn path_is_gone(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
 }
 
 /// Курсор файла обновляется на месте. Новый путь дописывается в конец.
@@ -501,17 +575,18 @@ mod tests {
     }
 
     #[test]
-    fn render_mode_roundtrips_in_session() {
-        assert_eq!(ViewMode::parse("render"), ViewMode::Render);
-        assert_eq!(ViewMode::Render.as_str(), "render");
+    fn saved_render_opens_as_edit() {
+        assert_eq!(ViewMode::parse("render"), ViewMode::Edit);
+        assert_eq!(ViewMode::Edit.as_str(), "edit");
         let session = Session::from_json(r#"{"view_mode":"render","open_mode":"render"}"#).unwrap();
-        assert_eq!(session.view_mode, ViewMode::Render);
-        assert_eq!(session.open_mode, ViewMode::Render);
+        assert_eq!(session.view_mode, ViewMode::Edit);
+        assert_eq!(session.open_mode, ViewMode::Edit);
         let mut session = Session::default();
-        session.remember_mode(PathBuf::from("/a.md"), ViewMode::Render);
-        assert_eq!(session.mode_of(Path::new("/a.md")), Some(ViewMode::Render));
+        session.remember_mode(PathBuf::from("/a.md"), ViewMode::Edit);
+        assert_eq!(session.mode_of(Path::new("/a.md")), Some(ViewMode::Edit));
         let json = serde_json::to_string(&session).unwrap();
-        assert!(json.contains("render"));
+        assert!(json.contains("edit"));
+        assert!(!json.contains("render"));
     }
 
     #[test]
@@ -620,5 +695,59 @@ mod tests {
             Session::from_json(r#"{"file_modes":[{"path":"/a.md","mode":"preview"}]}"#).unwrap();
         assert_eq!(session.mode_of(Path::new("/a.md")), Some(ViewMode::Preview));
         assert_eq!(session.mode_of(Path::new("/missing.md")), None);
+    }
+
+    #[test]
+    fn metadata_error_keeps_the_open_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("verst_meta_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("live.md");
+        fs::write(&live, "текст").unwrap();
+        let blocked = dir.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        let hidden = blocked.join("secret.md");
+        fs::write(&hidden, "секрет").unwrap();
+        let missing = dir.join("gone.md");
+        let mut session = Session::default();
+        session.pins.push(dir.clone());
+        session.open_files = vec![live.clone(), hidden.clone(), missing.clone()];
+        session.pane_paths[0] = Some(hidden.clone());
+        session.recent_files.push(missing.clone());
+        session.carets.push(CaretPlace {
+            path: missing.clone(),
+            line: 1,
+            column: 0,
+        });
+        session.file_modes.push(FileMode {
+            path: hidden.clone(),
+            mode: ViewMode::Edit,
+        });
+        let mut perms = fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&blocked, perms.clone()).unwrap();
+        let unreadable = fs::metadata(&hidden).is_err();
+        let sweep = session.sweep_missing();
+        session.retain_present();
+        perms.set_mode(0o755);
+        fs::set_permissions(&blocked, perms).unwrap();
+        assert!(session.pins.contains(&dir));
+        assert!(session.open_files.contains(&live));
+        assert!(!session.open_files.iter().any(|path| path == &missing));
+        assert!(!session.recent_files.iter().any(|path| path == &missing));
+        assert!(session.carets.iter().all(|place| place.path != missing));
+        assert!(sweep.files.iter().any(|path| path == &missing));
+        if unreadable {
+            assert!(
+                session.open_files.contains(&hidden),
+                "ошибка метаданных не снимает открытый файл"
+            );
+            assert_eq!(session.pane_paths[0].as_ref(), Some(&hidden));
+            assert!(session.file_modes.iter().any(|item| item.path == hidden));
+            assert!(sweep.files.iter().all(|path| path != &hidden));
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

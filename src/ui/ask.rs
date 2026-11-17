@@ -251,7 +251,7 @@ impl Ctx {
         if browsing || writing || self.any_table_cell_focused() {
             return false;
         }
-        if !matches!(mode, ViewMode::Edit | ViewMode::Render) {
+        if mode != ViewMode::Edit {
             return false;
         }
         self.widgets.content_stack.visible_child_name().as_deref() == Some("edit")
@@ -559,8 +559,7 @@ impl Ctx {
         let current = fragment_of(&hold).unwrap_or_default();
         let prefix = if current.ends_with('\n') { "" } else { "\n" };
         hold.buffer.begin_user_action();
-        hold.buffer
-            .insert(&mut end, &format!("{prefix}{answer}"));
+        hold.buffer.insert(&mut end, &format!("{prefix}{answer}"));
         hold.buffer.end_user_action();
         self.set_status("Ответ добавлен ниже");
         self.widgets.ask_popover.popdown();

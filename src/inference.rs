@@ -641,7 +641,8 @@ mod tests {
 
     #[test]
     fn exchange_log_keeps_newest_first() {
-        let dir = std::env::temp_dir().join(format!("text_workspace_ask_log_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("text_workspace_ask_log_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ask_log.json");

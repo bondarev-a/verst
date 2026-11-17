@@ -54,7 +54,10 @@ impl Ctx {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_file() || !is_markdown(&path) {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_dir() || !is_markdown(&path) {
                     continue;
                 }
                 let text = self.note_text(&path);
@@ -121,10 +124,7 @@ impl Ctx {
     fn mark_note_group(&self, group: notes::NoteGroup) {
         for (button, mode) in [
             (&self.widgets.notes_group_flat, notes::NoteGroup::Flat),
-            (
-                &self.widgets.notes_group_created,
-                notes::NoteGroup::Created,
-            ),
+            (&self.widgets.notes_group_created, notes::NoteGroup::Created),
             (
                 &self.widgets.notes_group_modified,
                 notes::NoteGroup::Modified,
@@ -171,8 +171,7 @@ impl Ctx {
                 let month = days[index].month;
                 let month_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                 month_box.add_css_class("note-branch");
-                while index < days.len() && days[index].year == year && days[index].month == month
-                {
+                while index < days.len() && days[index].year == year && days[index].month == month {
                     let day_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
                     day_box.add_css_class("note-branch");
                     for note_index in &days[index].indexes {
@@ -225,7 +224,9 @@ impl Ctx {
         tags.sort();
         self.widgets.notes_tags_fold.set_visible(!tags.is_empty());
         self.widgets.notes_tags_all.set_visible(tags.len() > 3);
-        self.widgets.notes_tags.append(&self.note_tag_chip(None, filter));
+        self.widgets
+            .notes_tags
+            .append(&self.note_tag_chip(None, filter));
         for tag in tags {
             self.widgets
                 .notes_tags
@@ -234,7 +235,10 @@ impl Ctx {
     }
 
     fn note_tag_chip(&self, tag: Option<String>, filter: Option<&str>) -> gtk4::Button {
-        let title = tag.as_deref().map(|tag| format!("#{tag}")).unwrap_or_else(|| "Все".to_string());
+        let title = tag
+            .as_deref()
+            .map(|tag| format!("#{tag}"))
+            .unwrap_or_else(|| "Все".to_string());
         let button = gtk4::Button::with_label(&title);
         button.add_css_class("flat");
         button.add_css_class("tag-chip");
@@ -326,9 +330,7 @@ impl Ctx {
             .default_width(420)
             .build();
         dialog.add_css_class("prompt-dialog");
-        let text = gtk4::Label::new(Some(&format!(
-            "Удалить «{label}»? Файл исчезнет с диска."
-        )));
+        let text = gtk4::Label::new(Some(&format!("Удалить «{label}»? Файл исчезнет с диска.")));
         text.set_wrap(true);
         text.set_halign(gtk4::Align::Start);
         text.set_margin_bottom(12);
@@ -480,17 +482,13 @@ impl Ctx {
         let ctx = self.clone();
         let source = path.to_path_buf();
         let window = self.widgets.window.clone();
-        dialog.save(
-            Some(&window),
-            None::<&gio::Cancellable>,
-            move |result| {
-                if let Ok(file) = result {
-                    if let Some(dest) = file.path() {
-                        ctx.finish_move_note(&source, &dest);
-                    }
+        dialog.save(Some(&window), None::<&gio::Cancellable>, move |result| {
+            if let Ok(file) = result {
+                if let Some(dest) = file.path() {
+                    ctx.finish_move_note(&source, &dest);
                 }
-            },
-        );
+            }
+        });
     }
 
     fn finish_move_note(&self, path: &Path, dest: &Path) {
@@ -669,7 +667,11 @@ fn note_stamp(note: &InboxNote, group: notes::NoteGroup) -> (i32, u32, u32) {
 fn local_ymd(time: SystemTime) -> Option<(i32, u32, u32)> {
     let secs = time.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
     let local = gtk4::glib::DateTime::from_unix_local(secs).ok()?;
-    Some((local.year(), local.month() as u32, local.day_of_month() as u32))
+    Some((
+        local.year(),
+        local.month() as u32,
+        local.day_of_month() as u32,
+    ))
 }
 
 fn month_name(month: u32) -> &'static str {

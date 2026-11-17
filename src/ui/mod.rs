@@ -14,15 +14,13 @@ use text_workspace::{graph, index, kind, markdown, places, seams, session, zoom}
 fn mode_dropdown_index(mode: ViewMode) -> u32 {
     match mode {
         ViewMode::Edit => 0,
-        ViewMode::Render => 1,
-        ViewMode::Preview => 2,
+        ViewMode::Preview => 1,
     }
 }
 
 fn mode_from_dropdown(index: u32) -> ViewMode {
     match index {
-        1 => ViewMode::Render,
-        2 => ViewMode::Preview,
+        1 => ViewMode::Preview,
         _ => ViewMode::Edit,
     }
 }
@@ -530,12 +528,17 @@ impl Ctx {
         let activity_icons = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
         let mut activity_buttons = Vec::new();
         for id in &session.left_order {
-            let Some(spec) = seams::panels().iter().find(|panel| {
-                panel.side == seams::PanelSide::Left && panel.id == id.as_str()
-            }) else {
+            let Some(spec) = seams::panels()
+                .iter()
+                .find(|panel| panel.side == seams::PanelSide::Left && panel.id == id.as_str())
+            else {
                 continue;
             };
-            let button = activity_icon(spec.id, seams::panel_hint(spec.id), seams::panel_icon(spec.id));
+            let button = activity_icon(
+                spec.id,
+                seams::panel_hint(spec.id),
+                seams::panel_icon(spec.id),
+            );
             activity_icons.append(&button);
             activity_buttons.push(button);
         }
@@ -822,18 +825,14 @@ impl Ctx {
         pins_scroll.set_hexpand(true);
         pins_scroll.set_propagate_natural_height(true);
         pins_scroll.set_child(Some(&pins_box));
-        let open_mode_dropdown =
-            gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
+        let open_mode_dropdown = gtk4::DropDown::from_strings(&["Редактирование", "Просмотр"]);
         open_mode_dropdown.set_selected(mode_dropdown_index(session.open_mode));
-        open_mode_dropdown.set_tooltip_text(Some(
-            "Вид текущего файла: редактирование, рендеринг или просмотр",
-        ));
+        open_mode_dropdown
+            .set_tooltip_text(Some("Вид текущего файла: редактирование или просмотр"));
         let open_mode_label = gtk4::Label::new(Some("Вид"));
         open_mode_label.add_css_class("dim-label");
-        let bar_zoom_spin = zoom_bar_spin(
-            session.zoom_pt,
-            "Масштаб окна. Клавиши Ctrl++ и Ctrl+−.",
-        );
+        let bar_zoom_spin =
+            zoom_bar_spin(session.zoom_pt, "Масштаб окна. Клавиши Ctrl++ и Ctrl+−.");
         let bar_text_spin = zoom_bar_spin(
             session.text_pt,
             "Масштаб текста. Клавиши Ctrl+Shift++ и Ctrl+Shift+−.",
@@ -902,7 +901,8 @@ impl Ctx {
         root.append(&status);
 
         let header = gtk4::HeaderBar::new();
-        let (window_width, window_height) = fitted_size(session.window_width, session.window_height);
+        let (window_width, window_height) =
+            fitted_size(session.window_width, session.window_height);
         let window = gtk4::ApplicationWindow::builder()
             .application(app)
             .title(APP_TITLE)
@@ -1218,10 +1218,7 @@ impl Ctx {
             gtk4::gdk::FileList::static_type(),
             gtk4::gdk::DragAction::COPY,
         );
-        target.set_types(&[
-            gtk4::gdk::FileList::static_type(),
-            gio::File::static_type(),
-        ]);
+        target.set_types(&[gtk4::gdk::FileList::static_type(), gio::File::static_type()]);
         let ctx = self.clone();
         target.connect_drop(move |_, value, _, _| ctx.accept_dropped_files(value));
         self.widgets.window.add_controller(target);
@@ -1349,7 +1346,9 @@ impl Ctx {
             });
 
         let ctx = self.clone();
-        self.widgets.notes_new.connect_clicked(move |_| ctx.quick_note());
+        self.widgets
+            .notes_new
+            .connect_clicked(move |_| ctx.quick_note());
         let ctx = self.clone();
         self.widgets
             .notes_group_flat
@@ -1425,7 +1424,9 @@ impl Ctx {
             }
         });
         let ctx = self.clone();
-        self.widgets.nav_expand.connect_clicked(move |_| ctx.expand_nav());
+        self.widgets
+            .nav_expand
+            .connect_clicked(move |_| ctx.expand_nav());
         let ctx = self.clone();
         self.widgets.info_pin.connect_toggled(move |button| {
             ctx.set_info_pinned(button.is_active());
@@ -1435,7 +1436,9 @@ impl Ctx {
             .info_rail_pin
             .connect_toggled(move |button| ctx.set_info_pinned(button.is_active()));
         let ctx = self.clone();
-        self.widgets.info_fold.connect_clicked(move |_| ctx.fold_info());
+        self.widgets
+            .info_fold
+            .connect_clicked(move |_| ctx.fold_info());
         let ctx = self.clone();
         self.widgets
             .info_expand
@@ -1526,7 +1529,6 @@ impl Ctx {
         });
         self.widgets.content_stack.add_controller(click);
 
-
         let ctx = self.clone();
         self.widgets
             .history_list
@@ -1598,13 +1600,17 @@ impl Ctx {
 
         self.watch_table_widths();
         let ctx = self.clone();
-        self.widgets.bar_zoom_spin.connect_value_changed(move |spin| {
-            ctx.set_zoom_pt(spin.value() as i32);
-        });
+        self.widgets
+            .bar_zoom_spin
+            .connect_value_changed(move |spin| {
+                ctx.set_zoom_pt(spin.value() as i32);
+            });
         let ctx = self.clone();
-        self.widgets.bar_text_spin.connect_value_changed(move |spin| {
-            ctx.set_text_pt(spin.value() as i32);
-        });
+        self.widgets
+            .bar_text_spin
+            .connect_value_changed(move |spin| {
+                ctx.set_text_pt(spin.value() as i32);
+            });
         let ctx = self.clone();
         self.widgets
             .open_mode_dropdown
@@ -1612,19 +1618,7 @@ impl Ctx {
                 if ctx.state.borrow().loading {
                     return;
                 }
-                let mut mode = mode_from_dropdown(dropdown.selected());
-                let markdown = ctx
-                    .focused_path()
-                    .is_some_and(|path| is_markdown(&path));
-                if mode == ViewMode::Render && !markdown {
-                    ctx.set_status("Рендеринг только для Markdown");
-                    mode = ViewMode::Edit;
-                    let index = mode_dropdown_index(mode);
-                    if dropdown.selected() != index {
-                        dropdown.set_selected(index);
-                        return;
-                    }
-                }
+                let mode = mode_from_dropdown(dropdown.selected());
                 ctx.change_view_mode(mode);
             });
         let ctx = self.clone();
@@ -2017,16 +2011,22 @@ impl Ctx {
 
     fn prompt_directory(&self, parent: PathBuf) {
         let ctx = self.clone();
-        self.prompt_entry("Новый каталог", "Имя каталога", parent, move |folder, raw| {
-            ctx.make_directory(folder, raw)
-        });
+        self.prompt_entry(
+            "Новый каталог",
+            "Имя каталога",
+            parent,
+            move |folder, raw| ctx.make_directory(folder, raw),
+        );
     }
 
     fn prompt_file(&self, parent: PathBuf) {
         let ctx = self.clone();
-        self.prompt_entry("Новый файл", "Имя файла", parent, move |folder, raw| {
-            ctx.make_file(folder, raw)
-        });
+        self.prompt_entry(
+            "Новый файл",
+            "Имя файла",
+            parent,
+            move |folder, raw| ctx.make_file(folder, raw),
+        );
     }
 
     fn prompt_entry(
@@ -2155,17 +2155,6 @@ impl Ctx {
         if let Some(parent) = self.widgets.second_scroll.parent() {
             parent.set_visible(session.split);
         }
-        if let Some(path) = session.pane_paths.first().cloned().flatten() {
-            self.state.borrow_mut().session.focused_pane = 0;
-            self.open_path(path);
-        }
-        if session.split {
-            if let Some(path) = session.pane_paths.get(1).cloned().flatten() {
-                self.state.borrow_mut().session.focused_pane = 1;
-                self.open_path(path);
-            }
-        }
-        self.state.borrow_mut().session.focused_pane = session.focused_pane.min(1);
         self.rebuild_pins();
         self.mount_workspace();
         apply_notebook_order(&self.widgets.left_notebook, &session.left_order);
@@ -2178,8 +2167,23 @@ impl Ctx {
         ));
         self.apply_nav_dock();
         self.apply_info_dock();
+        self.apply_wrap();
+        if let Some(path) = session.pane_paths.first().cloned().flatten() {
+            self.state.borrow_mut().session.focused_pane = 0;
+            self.open_path(path);
+        }
+        if session.split {
+            if let Some(path) = session.pane_paths.get(1).cloned().flatten() {
+                self.state.borrow_mut().session.focused_pane = 1;
+                self.open_path(path);
+            }
+        }
+        self.state.borrow_mut().session.focused_pane = session.focused_pane.min(1);
         let focused = self.focused_path();
-        let mode = if focused.as_deref().is_some_and(text_workspace::notes::is_inbox) {
+        let mode = if focused
+            .as_deref()
+            .is_some_and(text_workspace::notes::is_inbox)
+        {
             ViewMode::Edit
         } else {
             focused
@@ -2197,14 +2201,91 @@ impl Ctx {
                     .remember_mode(path, ViewMode::Edit);
             }
         }
-        self.reindex();
         self.follow_focus();
         self.refresh_open_list();
-        self.refresh_notes();
         self.apply_view_mode();
         self.apply_wrap();
         self.restore_carets(&session);
         self.state.borrow_mut().loading = false;
+        self.save_session();
+        // Индекс, заметки и проверка всех путей — после показа окна.
+        let ctx = self.clone();
+        glib::idle_add_local_once(move || {
+            ctx.reindex();
+            ctx.refresh_notes();
+            ctx.prune_missing_paths();
+        });
+    }
+
+    fn prune_missing_paths(&self) {
+        let session = self.state.borrow().session.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(session.sweep_missing());
+        });
+        let ctx = self.clone();
+        glib::timeout_add_local(Duration::from_millis(200), move || {
+            match receiver.try_recv() {
+                Ok(gone) => {
+                    ctx.drop_missing_paths(gone);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+    }
+
+    fn drop_missing_paths(&self, gone: session::SessionSweep) {
+        if gone.pins.is_empty() && gone.files.is_empty() {
+            return;
+        }
+        let focused = self.focused_path();
+        {
+            let mut state = self.state.borrow_mut();
+            let open = state.buffers.keys().cloned().collect::<Vec<_>>();
+            let drop_file = |path: &Path| {
+                gone.files.iter().any(|item| item == path) && !open.iter().any(|item| item == path)
+            };
+            state
+                .session
+                .pins
+                .retain(|path| !gone.pins.iter().any(|item| item == path));
+            if state
+                .session
+                .active_pin
+                .is_some_and(|index| index >= state.session.pins.len())
+            {
+                state.session.active_pin = if state.session.pins.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                };
+            }
+            state.session.open_files.retain(|path| !drop_file(path));
+            state.session.pinned_files.retain(|path| !drop_file(path));
+            state.session.recent_files.retain(|path| !drop_file(path));
+            state.session.carets.retain(|place| !drop_file(&place.path));
+            state
+                .session
+                .file_modes
+                .retain(|item| !drop_file(&item.path));
+            for pane in &mut state.session.pane_paths {
+                if pane.as_ref().is_some_and(|path| drop_file(path)) {
+                    *pane = None;
+                }
+            }
+        }
+        if !gone.pins.is_empty() {
+            self.mount_workspace();
+            self.reindex();
+        }
+        self.refresh_open_list();
+        if focused.is_some_and(|path| gone.files.iter().any(|item| item == &path))
+            && self.focused_path().is_none()
+        {
+            self.follow_focus();
+        }
         self.save_session();
     }
 
@@ -2470,10 +2551,9 @@ impl Ctx {
                 let shown = path.display().to_string();
                 self.widgets.path_label.set_text(&shown);
                 self.widgets.path_label.set_tooltip_text(Some(&shown));
-                self.widgets.window.set_title(Some(&format!(
-                    "{} — {APP_TITLE}",
-                    file_label(path)
-                )));
+                self.widgets
+                    .window
+                    .set_title(Some(&format!("{} — {APP_TITLE}", file_label(path))));
                 self.widgets.doc_label.set_text(&file_label(path));
                 self.widgets
                     .doc_label
@@ -2489,9 +2569,11 @@ impl Ctx {
         }
         self.refresh_outline();
         self.refresh_file_facts();
-        self.refresh_preview_now();
-        self.refresh_backlinks();
-        self.relayout_graph();
+        if !self.state.borrow().loading {
+            self.refresh_preview_now();
+            self.refresh_backlinks();
+            self.relayout_graph();
+        }
         self.refresh_open_list();
         self.apply_view_mode();
         self.update_pin_button();
@@ -2510,11 +2592,9 @@ impl Ctx {
             self.set_status("Этот файл только для просмотра");
             return;
         }
-        let markdown = self.focused_path().is_some_and(|path| is_markdown(&path));
-        let next = match (self.state.borrow().view_mode, markdown) {
-            (ViewMode::Edit, true) => ViewMode::Render,
-            (ViewMode::Render, _) => ViewMode::Preview,
-            (ViewMode::Preview, _) | (ViewMode::Edit, false) => ViewMode::Edit,
+        let next = match self.state.borrow().view_mode {
+            ViewMode::Edit => ViewMode::Preview,
+            ViewMode::Preview => ViewMode::Edit,
         };
         self.change_view_mode(next);
     }
@@ -2557,11 +2637,14 @@ impl Ctx {
 
     fn finish_view_mode(&self, next: ViewMode, anchor: Option<u32>) {
         self.state.borrow_mut().view_mode = next;
-        self.state.borrow_mut().pending_view_line =
-            if next == ViewMode::Preview { None } else { anchor };
+        self.state.borrow_mut().pending_view_line = if next == ViewMode::Preview {
+            None
+        } else {
+            anchor
+        };
         self.remember_focused_mode();
         self.apply_view_mode();
-        if next == ViewMode::Render {
+        if next == ViewMode::Edit && self.focused_path().is_some_and(|path| is_markdown(&path)) {
             self.refresh_render_now();
         }
         if let Some(line) = anchor {
@@ -2729,21 +2812,12 @@ impl Ctx {
             return;
         }
         let mode = self.state.borrow().view_mode;
-        let markdown = path.as_ref().is_some_and(|path| is_markdown(path));
-        let mode = if mode == ViewMode::Render && !markdown {
-            self.state.borrow_mut().view_mode = ViewMode::Edit;
-            self.sync_view_dropdown();
-            ViewMode::Edit
-        } else {
-            mode
-        };
         let show_preview = mode == ViewMode::Preview
             && path.as_ref().is_some_and(|path| {
                 is_markdown(path)
                     || matches!(kind::shown(path), kind::Shown::Html | kind::Shown::Svg)
             });
-        let editable = (mode == ViewMode::Edit || mode == ViewMode::Render)
-            && !self.any_table_cell_focused();
+        let editable = mode == ViewMode::Edit && !self.any_table_cell_focused();
         for view in &self.widgets.views {
             view.set_editable(editable);
             view.set_cursor_visible(editable);
@@ -3194,12 +3268,10 @@ impl Ctx {
         }
         self.clear_picture();
         if !is_markdown(&path) {
-            self.widgets
-                .preview
-                .load_html(
-                    "<p>Предпросмотр доступен для Markdown, HTML и SVG.</p>",
-                    None,
-                );
+            self.widgets.preview.load_html(
+                "<p>Предпросмотр доступен для Markdown, HTML и SVG.</p>",
+                None,
+            );
             return;
         }
         if view_mode != ViewMode::Preview {
@@ -4195,12 +4267,7 @@ impl Ctx {
                         self.state.borrow_mut().nav_dir = Some(path.clone());
                         self.open_space_tree();
                         if let Some(list) = self.widgets.workspace_list.borrow().clone() {
-                            reveal_in_tree(
-                                list,
-                                pin,
-                                path.clone(),
-                                self.tree_notice(),
-                            );
+                            reveal_in_tree(list, pin, path.clone(), self.tree_notice());
                         }
                         self.show_folder(path);
                         self.refresh_nav_path();
@@ -4229,12 +4296,7 @@ impl Ctx {
         self.show_panel("disk");
         self.state.borrow_mut().nav_dir = Some(path.clone());
         if let Some(list) = self.widgets.disk_list.borrow().clone() {
-            reveal_in_tree(
-                list,
-                PathBuf::from("/"),
-                path.clone(),
-                self.tree_notice(),
-            );
+            reveal_in_tree(list, PathBuf::from("/"), path.clone(), self.tree_notice());
         }
         self.show_folder(path);
         self.refresh_nav_path();
@@ -4337,20 +4399,14 @@ impl Ctx {
         self.widgets.info_rail.set_visible(!open);
         self.widgets.doc_side.set_hexpand(open);
         self.widgets.doc_side.set_halign(gtk4::Align::Fill);
-        self.widgets.doc_side.set_width_request(if open {
-            session::INFO_MIN_WIDTH
-        } else {
-            -1
-        });
+        self.widgets
+            .doc_side
+            .set_width_request(if open { session::INFO_MIN_WIDTH } else { -1 });
         if let Some(shell) = self.widgets.doc_side.parent() {
             shell.set_hexpand(open);
             shell.set_halign(gtk4::Align::Fill);
             shell.set_overflow(gtk4::Overflow::Hidden);
-            shell.set_width_request(if open {
-                session::INFO_MIN_WIDTH
-            } else {
-                end
-            });
+            shell.set_width_request(if open { session::INFO_MIN_WIDTH } else { end });
         }
         let paned = self.widgets.right_paned.clone();
         paned.set_resize_start_child(true);

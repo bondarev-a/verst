@@ -83,7 +83,7 @@ impl Ctx {
         });
         box_.append(&labeled("Тема исходника", &theme_dropdown));
 
-        let open_mode = gtk4::DropDown::from_strings(&["Редактирование", "Рендеринг", "Просмотр"]);
+        let open_mode = gtk4::DropDown::from_strings(&["Редактирование", "Просмотр"]);
         open_mode.set_selected(super::mode_dropdown_index(session.open_mode));
         open_mode.set_tooltip_text(Some(
             "Как открывать следующий файл. Кнопка в углу переключает вид текущего.",

@@ -6,22 +6,20 @@ use gtk4::gdk;
 use gtk4::glib::object::IsA;
 use gtk4::prelude::*;
 use gtk4::{glib, pango};
+use text_workspace::markdown;
 use text_workspace::markup::{mark_spans, MarkKind, MarkSpan};
 use text_workspace::session::ViewMode;
 use text_workspace::tables::{self, ColAlign, MdTable};
-use text_workspace::markdown;
 use text_workspace::zoom;
 
-use super::support::{
-    bind_table_cell_css, buffer_text_of, is_markdown, menu_row, scrolled_of,
-};
+use super::support::{bind_table_cell_css, buffer_text_of, is_markdown, menu_row, scrolled_of};
 use super::{Ctx, State, PREVIEW_MS};
 
 fn display_line_number_of(state: &State, buffer_line: i32) -> Option<i32> {
     if buffer_line < 0 {
         return None;
     }
-    if state.view_mode != ViewMode::Render {
+    if state.view_mode != ViewMode::Edit || state.render.tables.is_empty() {
         return Some(buffer_line + 1);
     }
     let mut hidden = 0i32;
@@ -36,9 +34,7 @@ fn display_line_number_of(state: &State, buffer_line: i32) -> Option<i32> {
     Some(buffer_line + 1 - hidden)
 }
 
-const TAG_HEADING: &[&str] = &[
-    "tw-h1", "tw-h2", "tw-h3", "tw-h4", "tw-h5", "tw-h6",
-];
+const TAG_HEADING: &[&str] = &["tw-h1", "tw-h2", "tw-h3", "tw-h4", "tw-h5", "tw-h6"];
 const TAG_STRONG: &str = "tw-strong";
 const TAG_EM: &str = "tw-em";
 const TAG_CODE: &str = "tw-code";
@@ -73,6 +69,8 @@ pub(super) struct RenderState {
     cell_redo: Vec<(String, i32, i32)>,
     /// Пока буфер откатывается, курсор не перекрашивает строки старыми смещениями.
     cursor_suspend: bool,
+    /// Рендер отложен, пока текстовое поле ещё не показано.
+    wait_realize: bool,
 }
 
 #[derive(Clone)]
@@ -103,7 +101,7 @@ impl Ctx {
             let ctx = self.clone();
             let view_click = view.clone();
             click.connect_pressed(move |gesture, _, x, y| {
-                if ctx.state.borrow().view_mode != ViewMode::Render {
+                if !ctx.editing_markdown() {
                     return;
                 }
                 if !pick_is_table_cell(&view_click, x, y) {
@@ -112,7 +110,10 @@ impl Ctx {
                 let Some(event) = gesture.current_event() else {
                     return;
                 };
-                if !event.modifier_state().contains(gdk::ModifierType::CONTROL_MASK) {
+                if !event
+                    .modifier_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK)
+                {
                     return;
                 }
                 let Ok(buffer) = view_click.buffer().downcast::<sourceview5::Buffer>() else {
@@ -143,7 +144,7 @@ impl Ctx {
             keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
             let ctx = self.clone();
             keys.connect_key_pressed(move |_, keyval, _, modifier| {
-                if ctx.state.borrow().view_mode != ViewMode::Render {
+                if !ctx.editing_markdown() {
                     return glib::Propagation::Proceed;
                 }
                 ctx.handle_table_key(keyval, modifier)
@@ -163,8 +164,16 @@ impl Ctx {
         }
     }
 
+    /// Markdown в редактировании показывает собранный текст и таблицы.
+    pub(super) fn editing_markdown(&self) -> bool {
+        if self.state.borrow().view_mode != ViewMode::Edit {
+            return false;
+        }
+        self.focused_path().is_some_and(|path| is_markdown(&path))
+    }
+
     pub(super) fn schedule_render(&self) {
-        if self.state.borrow().view_mode != ViewMode::Render {
+        if !self.editing_markdown() {
             return;
         }
         let tick = {
@@ -180,7 +189,7 @@ impl Ctx {
             if ctx.state.borrow().render.writing {
                 return;
             }
-            if ctx.state.borrow().view_mode != ViewMode::Render {
+            if !ctx.editing_markdown() {
                 return;
             }
             ctx.refresh_render_now();
@@ -188,7 +197,7 @@ impl Ctx {
     }
 
     pub(super) fn refresh_render_now(&self) {
-        if self.state.borrow().view_mode != ViewMode::Render {
+        if !self.editing_markdown() {
             self.clear_render_layer();
             return;
         }
@@ -201,6 +210,10 @@ impl Ctx {
             return;
         }
         if self.state.borrow().render.writing {
+            return;
+        }
+        if !self.focused_view().is_realized() {
+            self.render_after_realize();
             return;
         }
         let Some(buffer) = self
@@ -221,6 +234,26 @@ impl Ctx {
         }
         self.rebuild_widgets(&buffer, &path, cursor_line);
         self.restore_pending_view_line();
+    }
+
+    /// Якоря таблиц в ещё не показанном тексте роняют GTK.
+    fn render_after_realize(&self) {
+        if self.state.borrow().render.wait_realize {
+            return;
+        }
+        self.state.borrow_mut().render.wait_realize = true;
+        let view = self.focused_view();
+        let ctx = self.clone();
+        view.connect_realize(move |_| {
+            ctx.state.borrow_mut().render.wait_realize = false;
+            let ctx = ctx.clone();
+            glib::idle_add_local_once(move || ctx.refresh_render_now());
+        });
+        if view.is_realized() {
+            self.state.borrow_mut().render.wait_realize = false;
+            let ctx = self.clone();
+            glib::idle_add_local_once(move || ctx.refresh_render_now());
+        }
     }
 
     fn restore_pending_view_line(&self) {
@@ -369,9 +402,11 @@ impl Ctx {
                 ctx.sync_table_grid_widths();
                 if let Some(scroll) = scrolled_of(view) {
                     let ctx = ctx.clone();
-                    scroll.hadjustment().connect_notify_local(Some("page-size"), move |_, _| {
-                        ctx.sync_table_grid_widths();
-                    });
+                    scroll
+                        .hadjustment()
+                        .connect_notify_local(Some("page-size"), move |_, _| {
+                            ctx.sync_table_grid_widths();
+                        });
                 }
             });
         }
@@ -421,7 +456,10 @@ impl Ctx {
             .values()
             .map(|entry| entry.buffer.clone())
             .collect();
-        for buffer in buffers.iter().chain(std::iter::once(&self.widgets.empty_buffer)) {
+        for buffer in buffers
+            .iter()
+            .chain(std::iter::once(&self.widgets.empty_buffer))
+        {
             ensure_tag(&buffer.tag_table(), TAG_ZOOM, |tag| {
                 tag.set_scale(scale);
             });
@@ -431,7 +469,7 @@ impl Ctx {
                 buffer.apply_tag(&tag, &start, &end);
             }
         }
-        if self.state.borrow().view_mode != ViewMode::Render {
+        if !self.editing_markdown() {
             return;
         }
         let Some(path) = self.focused_path() else {
@@ -486,10 +524,11 @@ impl Ctx {
         let mode = self.state.borrow().view_mode;
         let path = self.focused_path();
         let markdown = path.as_ref().is_some_and(|path| is_markdown(path));
+        let rendered = mode == ViewMode::Edit && markdown;
         for view in &self.widgets.views {
-            view.set_monospace(mode != ViewMode::Render || !markdown);
+            view.set_monospace(!rendered);
         }
-        if mode == ViewMode::Render && markdown {
+        if rendered {
             self.schedule_render();
         } else {
             self.deactivate_table_cells();
@@ -559,8 +598,8 @@ impl Ctx {
     }
 
     fn table_edit_target(&self) -> Option<(PathBuf, usize, usize, usize)> {
-        if self.state.borrow().view_mode != ViewMode::Render {
-            self.set_status("Таблицу правят в режиме рендеринга");
+        if !self.editing_markdown() {
+            self.set_status("Таблицу правят при редактировании Markdown");
             return None;
         }
         let path = self.focused_path()?;
@@ -763,8 +802,7 @@ impl Ctx {
     }
 
     fn lock_source_input(&self, lock: bool) {
-        let mode = self.state.borrow().view_mode;
-        let allow = (mode == ViewMode::Edit || mode == ViewMode::Render) && !lock;
+        let allow = self.state.borrow().view_mode == ViewMode::Edit && !lock;
         for view in &self.widgets.views {
             view.set_editable(allow);
             view.set_cursor_visible(allow);
@@ -900,7 +938,11 @@ impl Ctx {
     fn table_entry(&self, table: usize, row: usize, col: usize) -> Option<gtk4::Entry> {
         let pane = self.focused_index();
         let state = self.state.borrow();
-        let live = state.render.tables.iter().find(|item| item.index == table)?;
+        let live = state
+            .render
+            .tables
+            .iter()
+            .find(|item| item.index == table)?;
         live.grids[pane]
             .child_at(col as i32, row as i32)
             .as_ref()
@@ -946,11 +988,7 @@ impl Ctx {
         }
     }
 
-    fn handle_table_key(
-        &self,
-        keyval: gdk::Key,
-        modifier: gdk::ModifierType,
-    ) -> glib::Propagation {
+    fn handle_table_key(&self, keyval: gdk::Key, modifier: gdk::ModifierType) -> glib::Propagation {
         let Some((table, row, col)) = self.focused_table_cell() else {
             return glib::Propagation::Proceed;
         };
@@ -1049,9 +1087,11 @@ impl Ctx {
             self.move_table_cell(path, table, row, col, rows, cols, 1, 0);
             return glib::Propagation::Stop;
         }
-        if ctrl && !(keyval == gdk::Key::a || keyval == gdk::Key::A
-            || keyval == gdk::Key::Left
-            || keyval == gdk::Key::Right)
+        if ctrl
+            && !(keyval == gdk::Key::a
+                || keyval == gdk::Key::A
+                || keyval == gdk::Key::Left
+                || keyval == gdk::Key::Right)
         {
             return glib::Propagation::Proceed;
         }
@@ -1268,9 +1308,7 @@ impl Ctx {
         ensure_tag(&table, TAG_HIDE, hide_source);
         ensure_tag(&table, TAG_TABLE, hide_table_source);
         ensure_tag(&table, TAG_ZOOM, |tag| {
-            tag.set_scale(zoom::webkit_factor(
-                self.state.borrow().session.text_pt,
-            ));
+            tag.set_scale(zoom::webkit_factor(self.state.borrow().session.text_pt));
         });
         ensure_tag(&table, TAG_LINK, |tag| {
             tag.set_underline(pango::Underline::Single);
@@ -1329,7 +1367,7 @@ impl Ctx {
             if mark.name().as_deref() != Some("insert") {
                 return;
             }
-            if ctx.state.borrow().view_mode != ViewMode::Render {
+            if !ctx.editing_markdown() {
                 return;
             }
             if ctx.state.borrow().render.writing
@@ -1460,12 +1498,7 @@ impl Ctx {
         }
     }
 
-    fn rebuild_widgets(
-        &self,
-        buffer: &sourceview5::Buffer,
-        path: &Path,
-        cursor_line: i32,
-    ) {
+    fn rebuild_widgets(&self, buffer: &sourceview5::Buffer, path: &Path, cursor_line: i32) {
         let text = buffer_text_of(buffer);
         let spans = mark_spans(&text);
         let md_tables = tables::parse_tables(&text);
@@ -1732,8 +1765,15 @@ impl Ctx {
 }
 
 enum Placement {
-    Table { index: usize, start: usize },
-    Image { start: usize, end: usize, dest: String },
+    Table {
+        index: usize,
+        start: usize,
+    },
+    Image {
+        start: usize,
+        end: usize,
+        dest: String,
+    },
 }
 
 impl Placement {
@@ -2239,11 +2279,7 @@ fn raise_tag(table: &gtk4::TextTagTable, tag: &gtk4::TextTag) {
     }
 }
 
-fn iter_at_file_byte(
-    buffer: &sourceview5::Buffer,
-    text: &str,
-    byte: usize,
-) -> gtk4::TextIter {
+fn iter_at_file_byte(buffer: &sourceview5::Buffer, text: &str, byte: usize) -> gtk4::TextIter {
     let target_chars = slice_bytes(text, 0, byte).chars().count();
     let mut iter = buffer.start_iter();
     let mut seen = 0usize;
