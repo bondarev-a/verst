@@ -209,6 +209,7 @@ enum Step {
     Split(String),
     Scroll,
     CursorShot,
+    CellShot,
     TableLeave(std::path::PathBuf),
     LinkEdit(std::path::PathBuf, u8),
     Action(String),
@@ -257,6 +258,10 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::TableLeave(paths[1].clone()));
         }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_CELL") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::CellShot);
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CURSOR") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -422,6 +427,39 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     here.contains("МЕТКА_ЯЧЕЙКИ")
                 );
                 run_steps(ctx, steps);
+            });
+        }
+        Step::CellShot => {
+            save_shot(&ctx, "cell-before");
+            let view = ctx.focused_view();
+            let buffer = view.buffer();
+            let mut line = 0;
+            while line < buffer.line_count() {
+                let Some(start) = buffer.iter_at_line(line) else { break };
+                let mut end = start.clone();
+                end.forward_to_line_end();
+                if buffer.text(&start, &end, true).starts_with("| ") {
+                    break;
+                }
+                line += 1;
+            }
+            let ctx2 = ctx.clone();
+            glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                // Строка данных таблицы: курсор в ней активирует ячейку.
+                if let Some(iter) = buffer.iter_at_line(line + 2) {
+                    buffer.place_cursor(&iter);
+                }
+                glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                    eprintln!(
+                        "PROF cell active {:?}, editable {}",
+                        ctx2.focused_table_cell(),
+                        ctx2.focused_view().is_editable()
+                    );
+                    save_shot(&ctx2, "cell-editing");
+                    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                        run_steps(ctx2, steps)
+                    });
+                });
             });
         }
         Step::CursorShot => {
