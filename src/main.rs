@@ -11,6 +11,7 @@ use gtk4::gio;
 use gtk4::prelude::*;
 
 fn main() -> gtk4::glib::ExitCode {
+    ui::prof_mark_main();
     // Профиль AppArmor закрывает только /usr/bin/verst. Локальная копия
     // иначе падает сразу: bwrap не может создать user namespace.
     if std::env::current_exe().ok().as_deref() != Some(std::path::Path::new("/usr/bin/verst")) {
@@ -18,7 +19,11 @@ fn main() -> gtk4::glib::ExitCode {
     }
     let app = gtk4::Application::builder()
         .application_id("local.textworkspace")
-        .flags(gio::ApplicationFlags::HANDLES_OPEN)
+        .flags(if std::env::var_os("VERST_PROF").is_some() {
+            gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::NON_UNIQUE
+        } else {
+            gio::ApplicationFlags::HANDLES_OPEN
+        })
         .build();
     app.connect_activate(ui::activate);
     app.connect_open(ui::open_files);

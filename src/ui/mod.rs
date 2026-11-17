@@ -144,6 +144,11 @@ mod notes;
 mod render;
 mod settings;
 mod support;
+pub(crate) mod prof;
+
+pub fn prof_mark_main() {
+    prof::mark_main();
+}
 use render::RenderState;
 use support::*;
 
@@ -332,6 +337,7 @@ pub fn activate(app: &gtk4::Application) {
     let ctx = ensure_ctx(app);
     ctx.widgets.window.unminimize();
     ctx.widgets.window.present();
+    prof::after_activate(&ctx);
 }
 
 /// Сессия хранит размер с большого монитора. Окно больше самого маленького
@@ -389,6 +395,7 @@ pub fn open_files(app: &gtk4::Application, files: &[gio::File], _hint: &str) {
 
 impl Ctx {
     fn new(app: &gtk4::Application) -> Self {
+    let _prof = crate::ui::prof::span("new");
         let session = session::Session::load();
         let empty_buffer = sourceview5::Buffer::new(None);
         empty_buffer.set_enable_undo(true);
@@ -2147,6 +2154,7 @@ impl Ctx {
     }
 
     fn restore(&self) {
+    let _prof = crate::ui::prof::span("restore");
         self.state.borrow_mut().loading = true;
         let session = self.state.borrow().session.clone();
         self.apply_ui_zoom();
@@ -2431,6 +2439,7 @@ impl Ctx {
     }
 
     fn rebuild_pins(&self) {
+    let _prof = crate::ui::prof::span("rebuild_pins");
         clear_box(&self.widgets.pins_box);
         let files = self.state.borrow().session.open_files.clone();
         let focused = self.focused_path();
@@ -2543,6 +2552,7 @@ impl Ctx {
     }
 
     fn follow_focus(&self) {
+    let _prof = crate::ui::prof::span("follow_focus");
         self.state.borrow_mut().nav_dir = None;
         self.apply_saved_mode();
         let path = self.focused_path();
@@ -2788,6 +2798,7 @@ impl Ctx {
     }
 
     fn apply_view_mode(&self) {
+    let _prof = crate::ui::prof::span("apply_view_mode");
         self.refresh_nav_path();
         self.sync_view_dropdown();
         let browsing = self.state.borrow().browsing;
@@ -2878,11 +2889,13 @@ impl Ctx {
     }
 
     fn refresh_open_list(&self) {
+    let _prof = crate::ui::prof::span("refresh_open_list");
         self.rebuild_pins();
         self.refresh_history();
     }
 
     fn refresh_history(&self) {
+    let _prof = crate::ui::prof::span("refresh_history");
         clear_list(&self.widgets.history_list);
         let files = self.state.borrow().session.recent_files.clone();
         if files.is_empty() {
@@ -3022,12 +3035,14 @@ impl Ctx {
     }
 
     fn refresh_outline(&self) {
+    let _prof = crate::ui::prof::span("refresh_outline");
         let headings = self.outline_headings();
         fill_outline(&self.widgets.outline_list, &headings);
         self.state.borrow_mut().headings = headings;
     }
 
     fn refresh_file_facts(&self) {
+    let _prof = crate::ui::prof::span("refresh_file_facts");
         clear_box(&self.widgets.file_facts);
         let Some(path) = self.focused_path() else {
             return;
@@ -3199,6 +3214,7 @@ impl Ctx {
     }
 
     fn refresh_preview_now(&self) {
+    let _prof = crate::ui::prof::span("refresh_preview_now");
         self.sync_open_tags();
         self.refresh_tag_chips();
         let view_mode = self.state.borrow().view_mode;
@@ -3317,6 +3333,7 @@ impl Ctx {
     }
 
     fn sync_open_tags(&self) {
+    let _prof = crate::ui::prof::span("sync_open_tags");
         let Some(pin) = self.pin_path() else {
             return;
         };
@@ -3342,6 +3359,7 @@ impl Ctx {
     }
 
     fn sync_open_links(&self) {
+    let _prof = crate::ui::prof::span("sync_open_links");
         let Some(active) = self.pin_path() else {
             return;
         };
@@ -3371,6 +3389,7 @@ impl Ctx {
     }
 
     fn outgoing_of_note(&self, path: &Path) -> Vec<PathBuf> {
+    let _prof = crate::ui::prof::span("outgoing_of_note");
         let Some(active) = self.pin_path() else {
             return Vec::new();
         };
@@ -3406,6 +3425,7 @@ impl Ctx {
     /// Входящие — обратные рёбра того же графа, из которого взяты исходящие.
     /// Для файла вне активного пина граф строится по его запиненному каталогу.
     fn incoming_of_note(&self, path: &Path) -> Vec<PathBuf> {
+    let _prof = crate::ui::prof::span("incoming_of_note");
         let Some(active) = self.pin_path() else {
             return Vec::new();
         };
@@ -3514,6 +3534,7 @@ impl Ctx {
     }
 
     fn refresh_tag_chips(&self) {
+    let _prof = crate::ui::prof::span("refresh_tag_chips");
         while let Some(child) = self.widgets.tag_box.first_child() {
             self.widgets.tag_box.remove(&child);
         }
@@ -3569,6 +3590,7 @@ impl Ctx {
     }
 
     fn refresh_backlinks(&self) {
+    let _prof = crate::ui::prof::span("refresh_backlinks");
         self.sync_open_links();
         let tag_query = self.state.borrow().tag_query.clone();
         if let Some(tag) = tag_query {
@@ -3693,6 +3715,7 @@ impl Ctx {
     }
 
     fn relayout_graph(&self) {
+    let _prof = crate::ui::prof::span("relayout_graph");
         let width = self.widgets.graph.width().max(280);
         let height = self.widgets.graph.height().max(360);
         let current = self.focused_path();
@@ -3740,6 +3763,7 @@ impl Ctx {
     }
 
     fn run_search(&self) {
+    let _prof = crate::ui::prof::span("run_search");
         let query = self.widgets.search_entry.text().to_string();
         let Some(pin) = self.pin_path() else {
             clear_list(&self.widgets.search_list);
@@ -3797,6 +3821,7 @@ impl Ctx {
     }
 
     fn reindex(&self) {
+    let _prof = crate::ui::prof::span("reindex");
         let Some(pin) = self.pin_path() else {
             self.state.borrow_mut().index = index::LinkIndex::default();
             self.refresh_links();

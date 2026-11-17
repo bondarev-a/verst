@@ -48,6 +48,7 @@ impl Ctx {
     }
 
     pub(super) fn refresh_notes(&self) {
+    let _prof = crate::ui::prof::span("refresh_notes");
         let dir = notes::notes_dir();
         let filter = self.state.borrow().session.note_tag.clone();
         let mut found = Vec::new();

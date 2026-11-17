@@ -17,6 +17,7 @@ impl Ctx {
     }
 
     pub(super) fn open_file(&self, path: PathBuf, keep_mode: bool) {
+    let _prof = crate::ui::prof::span("open_file");
         if path.is_dir() {
             return;
         }
@@ -115,6 +116,7 @@ impl Ctx {
     }
 
     pub(super) fn close_file(&self, path: &Path) {
+    let _prof = crate::ui::prof::span("close_file");
         self.drop_render_for_path(path);
         for pane in 0..2 {
             let shows = self
@@ -158,6 +160,7 @@ impl Ctx {
     }
 
     pub(super) fn ensure_buffer(&self, path: &Path) -> Result<(), String> {
+    let _prof = crate::ui::prof::span("ensure_buffer");
         if self.state.borrow().buffers.contains_key(path) {
             return Ok(());
         }
@@ -404,6 +407,7 @@ impl Ctx {
     }
 
     pub(super) fn write_file(&self, path: &Path, from_autosave: bool) {
+    let _prof = crate::ui::prof::span("write_file");
         let Some(text) = self.buffer_text(path) else {
             return;
         };
@@ -441,6 +445,7 @@ impl Ctx {
     }
 
     pub(super) fn on_disk_changed(&self, path: &Path) {
+    let _prof = crate::ui::prof::span("on_disk_changed");
         if self.state.borrow().conflict_open {
             return;
         }

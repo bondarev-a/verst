@@ -53,6 +53,7 @@ impl Ctx {
     }
 
     pub(super) fn go(&self, path: PathBuf, line: Option<u32>) {
+    let _prof = crate::ui::prof::span("go");
         if self.state.borrow().loading {
             self.open_path(path);
             if let Some(line) = line {
@@ -379,6 +380,7 @@ impl Ctx {
     }
 
     pub(super) fn settle_open_place(&self, pane: usize, path: &Path, clear_jump: bool) {
+    let _prof = crate::ui::prof::span("settle_open_place");
         if self.state.borrow().loading {
             return;
         }

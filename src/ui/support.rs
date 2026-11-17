@@ -1847,6 +1847,7 @@ pub(super) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 pub(super) fn buffer_text_of(buffer: &sourceview5::Buffer) -> String {
+    let _prof = crate::ui::prof::span("buffer_text_of");
     let start = buffer.start_iter();
     let end = buffer.end_iter();
     // slice с hidden: исходник таблицы с тегом invisible не выпадает при сохранении.

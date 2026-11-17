@@ -197,6 +197,7 @@ impl Ctx {
     }
 
     pub(super) fn refresh_render_now(&self) {
+    let _prof = crate::ui::prof::span("refresh_render_now");
         if !self.editing_markdown() {
             self.clear_render_layer();
             return;
@@ -324,6 +325,7 @@ impl Ctx {
     }
 
     fn drop_embeds(&self, tables: &[LiveTable], images: &[LiveImage]) {
+    let _prof = crate::ui::prof::span("drop_embeds");
         for table in tables {
             for grid in &table.grids {
                 detach_child(grid);
@@ -431,6 +433,7 @@ impl Ctx {
     }
 
     pub(super) fn sync_table_grid_widths(&self) {
+    let _prof = crate::ui::prof::span("sync_table_grid_widths");
         let tables: Vec<[gtk4::Grid; 2]> = self
             .state
             .borrow()
@@ -447,6 +450,7 @@ impl Ctx {
     }
 
     pub(super) fn apply_text_zoom_tags(&self) {
+    let _prof = crate::ui::prof::span("apply_text_zoom_tags");
         let pt = self.state.borrow().session.text_pt;
         let scale = zoom::webkit_factor(pt);
         let buffers: Vec<_> = self
@@ -692,6 +696,7 @@ impl Ctx {
     }
 
     fn restore_table_focus(&self) {
+    let _prof = crate::ui::prof::span("restore_table_focus");
         let Some((table, row, col)) = self.state.borrow_mut().render.pending_table_focus.take()
         else {
             return;
@@ -1426,6 +1431,7 @@ impl Ctx {
     }
 
     fn recover_table_cover(&self, buffer: &sourceview5::Buffer) {
+    let _prof = crate::ui::prof::span("recover_table_cover");
         let text = buffer_text_of(buffer);
         let tables: Vec<(usize, usize)> = self
             .state
@@ -1463,6 +1469,7 @@ impl Ctx {
     }
 
     fn shift_cursor_line(&self, line: i32) {
+    let _prof = crate::ui::prof::span("shift_cursor_line");
         let prev = self.state.borrow().render.cursor_line;
         if prev == Some(line) {
             return;
@@ -1499,9 +1506,10 @@ impl Ctx {
     }
 
     fn rebuild_widgets(&self, buffer: &sourceview5::Buffer, path: &Path, cursor_line: i32) {
-        let text = buffer_text_of(buffer);
-        let spans = mark_spans(&text);
-        let md_tables = tables::parse_tables(&text);
+    let _prof = crate::ui::prof::span("rebuild_widgets");
+        let text = { let _p = crate::ui::prof::span("rw:buffer_text"); buffer_text_of(buffer) };
+        let spans = { let _p = crate::ui::prof::span("rw:mark_spans"); mark_spans(&text) };
+        let md_tables = { let _p = crate::ui::prof::span("rw:parse_tables"); tables::parse_tables(&text) };
         let bodies: Vec<String> = md_tables
             .iter()
             .map(|table| slice_bytes(&text, table.start, table.end).to_string())
@@ -1592,6 +1600,7 @@ impl Ctx {
             )
         };
         self.drop_embeds(&old_tables, &old_images);
+        { let _p = crate::ui::prof::span("rw:free_old_widgets"); drop(old_tables); drop(old_images); }
 
         paint_tags(buffer, &text, &spans, cursor_line, &md_tables);
 
@@ -1664,6 +1673,7 @@ impl Ctx {
         bodies: Vec<String>,
         image_keys: Vec<String>,
     ) {
+    let _prof = crate::ui::prof::span("store_paint");
         let mut state = self.state.borrow_mut();
         state.render.line_starts = line_starts_of(text);
         state.render.text_len = text.len();
@@ -1682,6 +1692,7 @@ impl Ctx {
         table: &MdTable,
         index: usize,
     ) -> Option<LiveTable> {
+    let _prof = crate::ui::prof::span("mount_table");
         let text = buffer_text_of(buffer);
         let mut iter = iter_at_file_byte(buffer, &text, table.start);
         let anchor = buffer.create_child_anchor(&mut iter);
@@ -1720,6 +1731,7 @@ impl Ctx {
         start: usize,
         dest: &str,
     ) -> Option<LiveImage> {
+    let _prof = crate::ui::prof::span("mount_image");
         let text = buffer_text_of(buffer);
         let mut iter = iter_at_file_byte(buffer, &text, start);
         let anchor = buffer.create_child_anchor(&mut iter);
@@ -1791,6 +1803,7 @@ fn build_table_grid(
     table_index: usize,
     _focus_cell: Rc<RefCell<Option<(usize, usize)>>>,
 ) -> gtk4::Grid {
+    let _prof = crate::ui::prof::span("build_table_grid");
     let grid = gtk4::Grid::new();
     grid.add_css_class("tw-md-table");
     grid.set_column_homogeneous(true);
@@ -1903,6 +1916,7 @@ fn paint_tags(
     cursor_line: i32,
     _tables: &[MdTable],
 ) {
+    let _prof = crate::ui::prof::span("paint_tags");
     clear_render_tags(buffer);
     let cursor_range = line_byte_range(text, cursor_line);
     let mut jobs: Vec<(usize, usize, &'static str)> = Vec::new();
@@ -1952,6 +1966,7 @@ fn cover_embedded_source(
     spans: &[MarkSpan],
     cursor_line: i32,
 ) {
+    let _prof = crate::ui::prof::span("cover_embedded_source");
     for table in tables {
         cover_table_source(buffer, text, table.start, table.end);
     }
@@ -1974,6 +1989,7 @@ fn cover_embedded_source(
 }
 
 fn cover_table_source(buffer: &sourceview5::Buffer, text: &str, start: usize, end: usize) {
+    let _prof = crate::ui::prof::span("cover_table_source");
     let mut from = iter_at_file_byte(buffer, text, start);
     let to = iter_at_file_byte(buffer, text, end);
     if from.child_anchor().is_some() {
@@ -1991,6 +2007,7 @@ fn cover_table_source(buffer: &sourceview5::Buffer, text: &str, start: usize, en
 }
 
 fn lift_anchor_scale(buffer: &sourceview5::Buffer, anchor: &gtk4::TextChildAnchor) {
+    let _prof = crate::ui::prof::span("lift_anchor_scale");
     let a = buffer.iter_at_child_anchor(anchor);
     let mut b = a.clone();
     if !b.forward_char() {
@@ -2008,6 +2025,7 @@ fn lift_anchor_scale(buffer: &sourceview5::Buffer, anchor: &gtk4::TextChildAncho
 }
 
 fn lift_embedded(buffer: &sourceview5::Buffer, tables: &[LiveTable], images: &[LiveImage]) {
+    let _prof = crate::ui::prof::span("lift_embedded");
     for table in tables {
         lift_anchor_scale(buffer, &table.anchor);
     }
@@ -2024,6 +2042,7 @@ fn retag_cursor_line(
     line: i32,
     on_cursor: bool,
 ) -> bool {
+    let _prof = crate::ui::prof::span("retag_cursor_line");
     if line < 0 {
         return true;
     }
@@ -2199,6 +2218,7 @@ impl<'a> ByteCursor<'a> {
 }
 
 fn clear_render_tags(buffer: &sourceview5::Buffer) {
+    let _prof = crate::ui::prof::span("clear_render_tags");
     let start = buffer.start_iter();
     let end = buffer.end_iter();
     for name in [
@@ -2280,6 +2300,7 @@ fn raise_tag(table: &gtk4::TextTagTable, tag: &gtk4::TextTag) {
 }
 
 fn iter_at_file_byte(buffer: &sourceview5::Buffer, text: &str, byte: usize) -> gtk4::TextIter {
+    let _prof = crate::ui::prof::span("iter_at_file_byte");
     let target_chars = slice_bytes(text, 0, byte).chars().count();
     let mut iter = buffer.start_iter();
     let mut seen = 0usize;
@@ -2365,6 +2386,7 @@ fn remove_path_anchors(
     images: &[LiveImage],
     path: &Path,
 ) {
+    let _prof = crate::ui::prof::span("remove_path_anchors");
     let mut positions: Vec<(i32, gtk4::TextChildAnchor)> = Vec::new();
     for table in tables.iter().filter(|table| table.path == path) {
         if !table.anchor.is_deleted() {
@@ -2395,6 +2417,7 @@ fn remove_path_anchors(
 }
 
 fn detach_child(widget: &impl IsA<gtk4::Widget>) {
+    let _prof = crate::ui::prof::span("detach_child");
     if let Some(parent) = widget.parent() {
         if let Ok(view) = parent.downcast::<gtk4::TextView>() {
             view.remove(widget);
