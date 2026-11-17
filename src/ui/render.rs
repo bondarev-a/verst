@@ -572,8 +572,9 @@ impl Ctx {
             .iter()
             .map(|image| image.anchor.clone())
             .collect();
+        let map = TextMap::new(&buffer, &text);
         for (start, end) in tables {
-            cover_table_source(&buffer, &text, start, end);
+            cover_table_source(&buffer, &text, &map, start, end);
         }
         for anchor in &table_anchors {
             lift_anchor_scale(&buffer, anchor);
@@ -1517,8 +1518,9 @@ impl Ctx {
             .iter()
             .map(|image| image.anchor.clone())
             .collect();
+        let map = TextMap::new(buffer, &text);
         for (start, end) in tables {
-            cover_table_source(buffer, &text, start, end);
+            cover_table_source(buffer, &text, &map, start, end);
         }
         for anchor in &table_anchors {
             lift_anchor_scale(buffer, anchor);
@@ -1693,6 +1695,9 @@ impl Ctx {
         let mut live_tables = Vec::new();
         let mut live_images = Vec::new();
 
+        // Якоря вставляются с конца текста к началу, поэтому карта, снятая
+        // до вставки, верна для каждой следующей (более ранней) позиции.
+        let map = TextMap::new(buffer, &text);
         self.state.borrow_mut().render.writing = true;
         for place in placements {
             match place {
@@ -1700,12 +1705,12 @@ impl Ctx {
                     let Some(table) = md_tables.get(index) else {
                         continue;
                     };
-                    if let Some(live) = self.mount_table(buffer, path, &text, table, index) {
+                    if let Some(live) = self.mount_table(buffer, path, &text, &map, table, index) {
                         live_tables.push(live);
                     }
                 }
                 Placement::Image { start, dest, .. } => {
-                    if let Some(image) = self.mount_image(buffer, path, start, &dest) {
+                    if let Some(image) = self.mount_image(buffer, path, &text, &map, start, &dest) {
                         live_images.push(image);
                     }
                 }
@@ -1754,13 +1759,13 @@ impl Ctx {
         &self,
         buffer: &sourceview5::Buffer,
         path: &Path,
-        _text: &str,
+        text: &str,
+        map: &TextMap,
         table: &MdTable,
         index: usize,
     ) -> Option<LiveTable> {
     let _prof = crate::ui::prof::span("mount_table");
-        let text = buffer_text_of(buffer);
-        let mut iter = iter_at_file_byte(buffer, &text, table.start);
+        let mut iter = map.iter(buffer, text, table.start);
         let anchor = buffer.create_child_anchor(&mut iter);
         lift_anchor_scale(buffer, &anchor);
         let focus_cell = Rc::new(RefCell::new(None));
@@ -1800,12 +1805,13 @@ impl Ctx {
         &self,
         buffer: &sourceview5::Buffer,
         path: &Path,
+        text: &str,
+        map: &TextMap,
         start: usize,
         dest: &str,
     ) -> Option<LiveImage> {
     let _prof = crate::ui::prof::span("mount_image");
-        let text = buffer_text_of(buffer);
-        let mut iter = iter_at_file_byte(buffer, &text, start);
+        let mut iter = map.iter(buffer, text, start);
         let anchor = buffer.create_child_anchor(&mut iter);
         lift_anchor_scale(buffer, &anchor);
         let file = resolve_image(path, dest);
@@ -2033,8 +2039,9 @@ fn cover_embedded_source(
     cursor_line: i32,
 ) {
     let _prof = crate::ui::prof::span("cover_embedded_source");
+    let map = TextMap::new(buffer, text);
     for table in tables {
-        cover_table_source(buffer, text, table.start, table.end);
+        cover_table_source(buffer, text, &map, table.start, table.end);
     }
     let cursor_range = line_byte_range(text, cursor_line);
     let mut jobs: Vec<(usize, usize, &'static str)> = Vec::new();
@@ -2048,16 +2055,22 @@ fn cover_embedded_source(
         }
     }
     jobs.sort_by_key(|job| job.0);
-    let mut walk = ByteCursor::new(buffer, text);
+    let mut walk = ByteCursor { text, map };
     for (start, end, name) in jobs {
         walk.apply(buffer, start, end, name);
     }
 }
 
-fn cover_table_source(buffer: &sourceview5::Buffer, text: &str, start: usize, end: usize) {
+fn cover_table_source(
+    buffer: &sourceview5::Buffer,
+    text: &str,
+    map: &TextMap,
+    start: usize,
+    end: usize,
+) {
     let _prof = crate::ui::prof::span("cover_table_source");
-    let mut from = iter_at_file_byte(buffer, text, start);
-    let to = iter_at_file_byte(buffer, text, end);
+    let mut from = map.iter(buffer, text, start);
+    let to = map.iter(buffer, text, end);
     if from.child_anchor().is_some() {
         from.forward_char();
     }
