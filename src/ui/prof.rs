@@ -193,6 +193,7 @@ enum Step {
     Scroll,
     CursorShot,
     TableLeave(std::path::PathBuf),
+    LinkEdit(std::path::PathBuf, u8),
     Quit,
 }
 
@@ -216,6 +217,15 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(path, 0));
             steps.push(Step::Scroll);
             steps.push(Step::Report("scroll".to_string()));
+        }
+    }
+    if let Some(pair) = std::env::var_os("VERST_BENCH_LINKS") {
+        let paths: Vec<_> = std::env::split_paths(&pair).collect();
+        if paths.len() == 2 {
+            steps.push(Step::Go(paths[0].clone(), 0));
+            for stage in 0..3 {
+                steps.push(Step::LinkEdit(paths[1].clone(), stage));
+            }
         }
     }
     if let Some(pair) = std::env::var_os("VERST_BENCH_TABLE_LEAVE") {
@@ -308,6 +318,35 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             take_totals();
             reset_stall();
             scroll_stress(ctx, steps, 0, 0);
+        }
+        Step::LinkEdit(probe, stage) => {
+            let name = probe
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let marker = format!("ПРОБА [[{name}]] ");
+            let buffer = ctx.focused_view().buffer();
+            match stage {
+                1 => {
+                    if let Some(mut iter) = buffer.iter_at_line(2) {
+                        buffer.insert(&mut iter, &marker);
+                    }
+                }
+                2 => {
+                    if let Some(mut a) = buffer.iter_at_line(2) {
+                        let mut b = a.clone();
+                        b.forward_chars(marker.chars().count() as i32);
+                        if buffer.text(&a, &b, true) == marker {
+                            buffer.delete(&mut a, &mut b);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                eprintln!("PROF links stage {stage}: {}", ctx.links_report(&probe));
+                run_steps(ctx, steps);
+            });
         }
         Step::TableLeave(next) => {
             let view = ctx.focused_view();
