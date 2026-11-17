@@ -405,7 +405,7 @@ window.verst grid.tw-md-table {
     border: 1px solid alpha(@theme_fg_color, 0.18);
     border-radius: 6px;
     background-color: alpha(@theme_bg_color, 0.92);
-    min-width: 28em;
+    min-width: 8em;
 }
 window.verst entry.tw-md-cell {
     border-radius: 0;
@@ -417,7 +417,17 @@ window.verst entry.tw-md-cell {
     caret-color: transparent;
     padding: 4px 8px;
     min-height: 28px;
-    min-width: 4.5em;
+    /* Малый минимум: ширину колонкам раздаёт таблица по содержимому. */
+    min-width: 0.5em;
+}
+/* Ячейка вне правки: текст подписью с переносом по ширине колонки. */
+window.verst label.tw-md-cell-label {
+    border-right: 1px solid alpha(@theme_fg_color, 0.12);
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.12);
+    background-color: @theme_base_color;
+    color: @theme_fg_color;
+    padding: 4px 8px;
+    min-height: 28px;
 }
 window.verst textview.tw-editor entry.tw-md-cell,
 window.verst textview.tw-editor entry.tw-md-cell > text {
@@ -446,6 +456,7 @@ window.verst textview.tw-editor entry.tw-md-cell > text selection {
     color: @theme_selected_fg_color;
 }
 window.verst entry.tw-md-cell-head,
+window.verst label.tw-md-cell-label.tw-md-cell-head,
 window.verst textview.tw-editor entry.tw-md-cell-head > text {
     font-weight: bold;
     background-color: alpha(@theme_fg_color, 0.08);

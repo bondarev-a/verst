@@ -892,13 +892,16 @@ impl Ctx {
             return;
         };
         for grid in live.grids.iter().flatten() {
-            if let Some(entry) = grid
-                .child_at(col as i32, row as i32)
-                .as_ref()
-                .and_then(cell_entry_of)
-            {
+            let Some(cell) = grid.child_at(col as i32, row as i32) else {
+                continue;
+            };
+            if let Some(entry) = cell_entry_of(&cell) {
                 if entry.text() != value {
                     entry.set_text(value);
+                }
+            } else if let Some(label) = cell_label_of(&cell) {
+                if label.text() != value {
+                    label.set_text(value);
                 }
             }
         }
@@ -933,6 +936,7 @@ impl Ctx {
     }
 
     fn activate_table_cell(&self, table: usize, row: usize, col: usize) {
+        self.table_entry(table, row, col);
         if self.focused_table_cell() != Some((table, row, col)) {
             if let Some((prev_t, prev_r, prev_c)) = self.focused_table_cell() {
                 self.commit_active_cell(prev_t, prev_r, prev_c);
@@ -973,8 +977,20 @@ impl Ctx {
         }
     }
 
-    fn on_table_cell_click(&self, table: usize, row: usize, col: usize, x: f64, n_press: i32) {
+    fn on_table_cell_click(
+        &self,
+        table: usize,
+        row: usize,
+        col: usize,
+        x: f64,
+        y: f64,
+        n_press: i32,
+    ) {
         let same = self.focused_table_cell() == Some((table, row, col));
+        // Пока видна подпись с переносом, место щелчка считается по ней.
+        let shown_index = self
+            .table_entry(table, row, col)
+            .and_then(|entry| cell_label_index_at(&entry, x, y));
         if !same {
             self.activate_table_cell(table, row, col);
         }
@@ -983,7 +999,7 @@ impl Ctx {
         };
         entry.set_can_focus(true);
         entry.grab_focus();
-        let index = cell_index_at_x(&entry, x);
+        let index = shown_index.unwrap_or_else(|| cell_index_at_x(&entry, x));
         let typing = n_press >= 2 || same;
         self.state.borrow_mut().render.cell_typing = typing;
         self.set_cell_range(&entry, index, index);
@@ -1029,7 +1045,10 @@ impl Ctx {
         };
         let caret = self.state.borrow().render.cell_caret;
         bar.set_visible(true);
-        bar.set_margin_start(cell_caret_pixel_x(entry, caret).max(0));
+        // Текст шире ячейки поле ввода прокручивает, и курсор у правого края.
+        // Без ограничения нарисованный курсор уезжал в соседнюю ячейку.
+        let limit = (overlay.width() - 10).max(0);
+        bar.set_margin_start(cell_caret_pixel_x(entry, caret).clamp(0, limit));
     }
 
     pub(super) fn deactivate_table_cells(&self) {
@@ -1056,17 +1075,16 @@ impl Ctx {
 
     fn table_entry(&self, table: usize, row: usize, col: usize) -> Option<gtk4::Entry> {
         let pane = self.focused_index();
-        let state = self.state.borrow();
-        let live = state
-            .render
-            .tables
-            .iter()
-            .find(|item| item.index == table)?;
-        live.grids[pane]
-            .as_ref()?
-            .child_at(col as i32, row as i32)
-            .as_ref()
-            .and_then(cell_entry_of)
+        let cell = {
+            let state = self.state.borrow();
+            let live = state
+                .render
+                .tables
+                .iter()
+                .find(|item| item.index == table)?;
+            live.grids[pane].as_ref()?.child_at(col as i32, row as i32)?
+        };
+        ensure_cell_entry(self, &cell, table, row, col)
     }
 
     fn paint_cell_active_class(&self) {
@@ -1939,7 +1957,9 @@ fn build_table_grid(
     let _prof = crate::ui::prof::span("build_table_grid");
     let grid = gtk4::Grid::new();
     grid.add_css_class("tw-md-table");
-    grid.set_column_homogeneous(true);
+    // Ширина колонок по содержимому: длинному тексту больше места.
+    // Таблица всё равно не шире редактора (size_table_grid).
+    grid.set_column_homogeneous(false);
     grid.set_column_spacing(0);
     grid.set_row_spacing(0);
     grid.set_hexpand(true);
@@ -1954,86 +1974,137 @@ fn build_table_grid(
                 .cell(row, col)
                 .map(|cell| cell.text.clone())
                 .unwrap_or_default();
-            let entry = gtk4::Entry::new();
-            entry.set_text(raw.trim());
-            entry.set_hexpand(true);
-            entry.set_halign(gtk4::Align::Fill);
-            entry.set_width_chars(8);
-            entry.set_editable(true);
-            entry.set_can_focus(true);
-            entry.set_focus_on_click(false);
-            entry.add_css_class("tw-md-cell");
+            let xalign = match table.alignments.get(col).copied().unwrap_or(ColAlign::None) {
+                ColAlign::Left | ColAlign::None => 0.0,
+                ColAlign::Center => 0.5,
+                ColAlign::Right => 1.0,
+            };
+            // Вне правки ячейка показывает текст подписью с переносом по ширине
+            // колонки. Однострочное поле ввода видно только в активной ячейке.
+            // В файл при этом ничего не добавляется: перенос только на экране.
+            let label = gtk4::Label::new(Some(raw.trim()));
+            label.set_wrap(true);
+            label.set_wrap_mode(pango::WrapMode::WordChar);
+            label.set_max_width_chars(30);
+            // Pango при разрыве слова сам дописывает дефис. В файле его нет,
+            // поэтому и на экране он не нужен.
+            let attrs = pango::AttrList::new();
+            attrs.insert(pango::AttrInt::new_insert_hyphens(false));
+            label.set_attributes(Some(&attrs));
+            label.set_xalign(xalign);
+            label.set_hexpand(true);
+            label.set_halign(gtk4::Align::Fill);
+            label.set_valign(gtk4::Align::Fill);
+            label.add_css_class("tw-md-cell-label");
             if row == 0 {
-                entry.add_css_class("tw-md-cell-head");
+                label.add_css_class("tw-md-cell-head");
             }
-            match table.alignments.get(col).copied().unwrap_or(ColAlign::None) {
-                ColAlign::Left | ColAlign::None => {
-                    gtk4::prelude::EditableExt::set_alignment(&entry, 0.0);
-                }
-                ColAlign::Center => gtk4::prelude::EditableExt::set_alignment(&entry, 0.5),
-                ColAlign::Right => gtk4::prelude::EditableExt::set_alignment(&entry, 1.0),
-            }
+            // Поле ввода и курсор появятся при первой правке (ensure_cell_entry)
+            // поверх подписи; размер ячейки всегда задаёт подпись.
 
+            let overlay = gtk4::Overlay::new();
+            // Щелчки ловит вся ячейка: вне правки поле ввода скрыто.
             let ctx_cell = ctx.clone();
             let grab = gtk4::GestureClick::new();
             grab.set_button(1);
             grab.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            grab.connect_pressed(move |gesture, n_press, x, _| {
-                ctx_cell.on_table_cell_click(table_index, row, col, x, n_press);
+            grab.connect_pressed(move |gesture, n_press, x, y| {
+                ctx_cell.on_table_cell_click(table_index, row, col, x, y, n_press);
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
             });
-            entry.add_controller(grab);
+            overlay.add_controller(grab);
             let ctx_menu = ctx.clone();
             let path_menu = path.to_path_buf();
-            let entry_menu = entry.clone();
+            let anchor_menu = overlay.clone();
             let right = gtk4::GestureClick::new();
             right.set_button(3);
             right.connect_pressed(move |gesture, _, _, _| {
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
                 ctx_menu.show_table_menu(
-                    entry_menu.upcast_ref(),
+                    anchor_menu.upcast_ref(),
                     path_menu.clone(),
                     table_index,
                     row,
                     col,
                 );
             });
-            entry.add_controller(right);
-            let ctx_alloc = ctx.clone();
-            entry.connect_notify_local(Some("width"), move |entry, _| {
-                if ctx_alloc.focused_table_cell() == Some((table_index, row, col)) {
-                    ctx_alloc.sync_cell_caret_bar(entry);
-                }
-            });
-            let bar = gtk4::DrawingArea::new();
-            bar.add_css_class("tw-md-caret");
-            bar.set_halign(gtk4::Align::Start);
-            bar.set_valign(gtk4::Align::Fill);
-            bar.set_can_target(false);
-            bar.set_can_focus(false);
-            bar.set_sensitive(false);
-            bar.set_visible(false);
-            bar.set_content_width(2);
-            bar.set_draw_func(|area, cr, width, height| {
-                let color = area.color();
-                cr.set_source_rgba(
-                    f64::from(color.red()),
-                    f64::from(color.green()),
-                    f64::from(color.blue()),
-                    f64::from(color.alpha()),
-                );
-                cr.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
-                let _ = cr.fill();
-            });
-            let overlay = gtk4::Overlay::new();
+            overlay.add_controller(right);
             overlay.set_hexpand(true);
             overlay.set_halign(gtk4::Align::Fill);
-            overlay.set_child(Some(&entry));
-            overlay.add_overlay(&bar);
+            overlay.set_child(Some(&label));
             grid.attach(&overlay, col as i32, row as i32, 1, 1);
         }
     }
     grid
+}
+
+/// Поле ввода и курсор ячейки. Создаются при первой правке этой ячейки:
+/// GtkEntry тяжёлый, а нужен только в одной ячейке за раз.
+fn ensure_cell_entry(
+    ctx: &Ctx,
+    cell: &gtk4::Widget,
+    table_index: usize,
+    row: usize,
+    col: usize,
+) -> Option<gtk4::Entry> {
+    if let Some(entry) = cell_entry_of(cell) {
+        return Some(entry);
+    }
+    let overlay = cell.clone().downcast::<gtk4::Overlay>().ok()?;
+    let label = cell_label_of(cell)?;
+    let entry = gtk4::Entry::new();
+    entry.set_visible(false);
+    entry.set_text(&label.text());
+    entry.set_hexpand(true);
+    entry.set_halign(gtk4::Align::Fill);
+    // Узкое поле: ширину колонки задаёт таблица, а не текст. Размер ячейки
+    // задаёт подпись, поэтому при правке таблица не меняет размеры.
+    entry.set_width_chars(1);
+    entry.set_valign(gtk4::Align::Center);
+    entry.set_editable(true);
+    entry.set_can_focus(true);
+    entry.set_focus_on_click(false);
+    entry.add_css_class("tw-md-cell");
+    if label.has_css_class("tw-md-cell-head") {
+        entry.add_css_class("tw-md-cell-head");
+    }
+    gtk4::prelude::EditableExt::set_alignment(&entry, label.xalign());
+    let shown = label.clone();
+    entry.connect_changed(move |entry| {
+        let text = entry.text();
+        if shown.text() != text {
+            shown.set_text(&text);
+        }
+    });
+    let ctx_alloc = ctx.clone();
+    entry.connect_notify_local(Some("width"), move |entry, _| {
+        if ctx_alloc.focused_table_cell() == Some((table_index, row, col)) {
+            ctx_alloc.sync_cell_caret_bar(entry);
+        }
+    });
+    overlay.add_overlay(&entry);
+    let bar = gtk4::DrawingArea::new();
+    bar.add_css_class("tw-md-caret");
+    bar.set_halign(gtk4::Align::Start);
+    bar.set_valign(gtk4::Align::Fill);
+    bar.set_can_target(false);
+    bar.set_can_focus(false);
+    bar.set_sensitive(false);
+    bar.set_visible(false);
+    bar.set_content_width(2);
+    bar.set_draw_func(|area, cr, width, height| {
+        let color = area.color();
+        cr.set_source_rgba(
+            f64::from(color.red()),
+            f64::from(color.green()),
+            f64::from(color.blue()),
+            f64::from(color.alpha()),
+        );
+        cr.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+        let _ = cr.fill();
+    });
+    overlay.add_overlay(&bar);
+    Some(entry)
 }
 
 fn paint_tags(
@@ -2431,7 +2502,7 @@ fn table_pixel_width(view: &sourceview5::View) -> i32 {
     if width < 80 {
         560
     } else {
-        (width - 56).clamp(360, 2400)
+        (width - 56).clamp(120, 2400)
     }
 }
 
@@ -2588,12 +2659,64 @@ fn cell_entry_of(widget: &gtk4::Widget) -> Option<gtk4::Entry> {
     if let Ok(entry) = widget.clone().downcast::<gtk4::Entry>() {
         return Some(entry);
     }
+    let overlay = widget.clone().downcast::<gtk4::Overlay>().ok()?;
+    let mut child = overlay.first_child();
+    while let Some(node) = child {
+        if let Ok(entry) = node.clone().downcast::<gtk4::Entry>() {
+            return Some(entry);
+        }
+        child = node.next_sibling();
+    }
+    None
+}
+
+/// Подпись ячейки: основной ребёнок Overlay.
+fn cell_label_of(widget: &gtk4::Widget) -> Option<gtk4::Label> {
     widget
         .clone()
         .downcast::<gtk4::Overlay>()
+        .ok()?
+        .child()?
+        .downcast::<gtk4::Label>()
         .ok()
-        .and_then(|overlay| overlay.child())
-        .and_then(|child| child.downcast::<gtk4::Entry>().ok())
+}
+
+/// Ячейка показывает поле ввода (правка) поверх подписи или только подпись.
+/// Подпись при правке прозрачная, но остаётся на месте и держит размер.
+fn show_cell_editor(widget: &gtk4::Widget, editing: bool) {
+    let Some(entry) = cell_entry_of(widget) else {
+        return;
+    };
+    if gtk4::prelude::WidgetExt::is_visible(&entry) != editing {
+        entry.set_visible(editing);
+    }
+    if let Some(label) = cell_label_of(widget) {
+        label.set_opacity(if editing { 0.0 } else { 1.0 });
+    }
+}
+
+/// Номер символа под щелчком по подписи ячейки, с учётом переноса строк.
+/// None, если ячейка уже в правке.
+fn cell_label_index_at(entry: &gtk4::Entry, x: f64, y: f64) -> Option<i32> {
+    if gtk4::prelude::WidgetExt::is_visible(entry) {
+        return None;
+    }
+    let overlay = entry.parent()?;
+    let label = cell_label_of(&overlay)?;
+    let text = label.text().to_string();
+    if text.is_empty() {
+        return Some(0);
+    }
+    let (ox, oy) = label.layout_offsets();
+    let px = ((x - f64::from(ox)).max(0.0) * f64::from(pango::SCALE)) as i32;
+    let py = ((y - f64::from(oy)).max(0.0) * f64::from(pango::SCALE)) as i32;
+    let (_, byte_index, trailing) = label.layout().xy_to_index(px, py);
+    let mut byte_index = (byte_index as usize).min(text.len());
+    while byte_index > 0 && !text.is_char_boundary(byte_index) {
+        byte_index -= 1;
+    }
+    let chars = text[..byte_index].chars().count() as i32 + trailing;
+    Some(chars.min(text.chars().count() as i32))
 }
 
 fn overlay_caret_bar(overlay: &gtk4::Overlay) -> Option<gtk4::Widget> {
@@ -2610,6 +2733,7 @@ fn overlay_caret_bar(overlay: &gtk4::Overlay) -> Option<gtk4::Widget> {
 
 fn clear_cell_active(widget: &gtk4::Widget) {
     widget.remove_css_class("tw-md-cell-active");
+    show_cell_editor(widget, false);
     if let Ok(overlay) = widget.clone().downcast::<gtk4::Overlay>() {
         if let Some(bar) = overlay_caret_bar(&overlay) {
             bar.set_visible(false);
@@ -2622,6 +2746,7 @@ fn clear_cell_active(widget: &gtk4::Widget) {
 
 fn mark_cell_active(widget: &gtk4::Widget) {
     widget.add_css_class("tw-md-cell-active");
+    show_cell_editor(widget, true);
     if let Some(entry) = cell_entry_of(widget) {
         entry.add_css_class("tw-md-cell-active");
     }

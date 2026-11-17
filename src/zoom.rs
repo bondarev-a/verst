@@ -30,7 +30,7 @@ pub fn ui_css(pt: i32) -> String {
 pub fn text_css(pt: i32) -> String {
     let pt = clamp_pt(pt);
     format!(
-        "entry.tw-md-cell, entry.tw-md-cell > text {{
+        "entry.tw-md-cell, entry.tw-md-cell > text, label.tw-md-cell-label {{
             font-size: {pt}pt;
         }}
         gutterrenderertext.tw-line-numbers {{

@@ -108,8 +108,8 @@ pub struct Session {
     /// Сколько файлов держать в списке открытых. Лишние закрываются с самых давних.
     #[serde(default = "default_open_limit")]
     pub open_limit: u32,
-    /// Перенос длинных строк по ширине редактора.
-    #[serde(default)]
+    /// Перенос длинных строк по ширине редактора. Включён, если в сессии не указан.
+    #[serde(default = "default_true")]
     pub word_wrap: bool,
     /// В каком виде оставался каждый файл: редактирование или просмотр.
     #[serde(default)]
@@ -219,7 +219,8 @@ impl Default for Session {
             pinned_files: Vec::new(),
             recent_files: Vec::new(),
             open_limit: OPEN_LIMIT_DEFAULT,
-            word_wrap: false,
+            // Длинные строки переносятся по ширине окна; в файл ничего не добавляется.
+            word_wrap: true,
             file_modes: Vec::new(),
             note_tag: None,
             left_order: Vec::new(),
@@ -533,7 +534,7 @@ mod tests {
         assert!(session.pinned_files.is_empty());
         assert!(session.recent_files.is_empty());
         assert_eq!(session.open_limit, OPEN_LIMIT_DEFAULT);
-        assert!(!session.word_wrap);
+        assert!(session.word_wrap);
         assert!(session.file_modes.is_empty());
         assert!(session.note_tag.is_none());
         assert_eq!(session.note_group, "flat");
