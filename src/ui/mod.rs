@@ -157,6 +157,8 @@ use support::*;
 pub(super) const AUTOSAVE_MS: u64 = 800;
 pub(super) const SESSION_SAVE_MS: u64 = 3000;
 pub(super) const PREVIEW_MS: u64 = 150;
+/// Боковые панели при наборе обновляются после такой паузы.
+pub(super) const SIDE_MS: u64 = 500;
 pub(super) const MAX_OPEN_BYTES: u64 = 8 * 1024 * 1024;
 pub(super) const TREE_ATTRS: &str =
     "standard::name,standard::display-name,standard::file,standard::symbolic-icon,standard::type";
@@ -175,6 +177,13 @@ struct BufferEntry {
     monitor: Option<gio::FileMonitor>,
     /// Обработчики курсора и правок для рендера уже подключены к этому буферу.
     render_hooked: bool,
+    /// Растёт при каждой правке текста. Обработчик правок держит копию Rc.
+    rev: Rc<Cell<u64>>,
+    /// (rev, links_gen), с которыми ссылки и теги этого файла уже попали в индекс.
+    links_synced: Option<(u64, u64)>,
+    tags_synced: Option<(u64, u64)>,
+    /// Исходящие ссылки, посчитанные при (rev, links_gen).
+    outgoing_cache: Option<(u64, u64, Vec<PathBuf>)>,
 }
 
 pub(super) struct State {
@@ -210,6 +219,10 @@ pub(super) struct State {
     /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
     keep_space_tree: bool,
     preview_tick: u64,
+    side_tick: u64,
+    /// Растёт, когда меняется то, от чего зависят ссылки: индекс, граф
+    /// чужого пина, активный пин. Кеши ссылок с другим значением устарели.
+    links_gen: u64,
 }
 
 #[derive(Clone)]
@@ -1092,6 +1105,8 @@ impl Ctx {
                 pending_view_line: None,
                 keep_space_tree: false,
                 preview_tick: 0,
+                side_tick: 0,
+                links_gen: 0,
             })),
             widgets,
         };
@@ -2537,8 +2552,7 @@ impl Ctx {
         self.refresh_file_facts();
         if !self.state.borrow().loading {
             self.refresh_preview_now();
-            self.refresh_backlinks();
-            self.relayout_graph();
+            self.refresh_side_panels();
         }
         self.refresh_open_list();
         self.apply_view_mode();
@@ -2954,14 +2968,30 @@ impl Ctx {
             state.preview_tick = state.preview_tick.wrapping_add(1);
             state.preview_tick
         };
+        // Предпросмотр нужен быстро, но только когда он на экране.
+        if self.state.borrow().view_mode == ViewMode::Preview {
+            let ctx = self.clone();
+            glib::timeout_add_local_once(Duration::from_millis(PREVIEW_MS), move || {
+                if ctx.state.borrow().preview_tick != tick {
+                    return;
+                }
+                ctx.refresh_preview_now();
+            });
+        }
+        // Оглавление, сведения, теги и ссылки — после паузы в наборе.
+        let side = {
+            let mut state = self.state.borrow_mut();
+            state.side_tick = state.side_tick.wrapping_add(1);
+            state.side_tick
+        };
         let ctx = self.clone();
-        glib::timeout_add_local_once(Duration::from_millis(PREVIEW_MS), move || {
-            if ctx.state.borrow().preview_tick != tick {
+        glib::timeout_add_local_once(Duration::from_millis(SIDE_MS), move || {
+            if ctx.state.borrow().side_tick != side {
                 return;
             }
             ctx.refresh_outline();
             ctx.refresh_file_facts();
-            ctx.refresh_preview_now();
+            ctx.refresh_side_panels();
         });
         self.schedule_render();
     }
@@ -3091,8 +3121,6 @@ impl Ctx {
 
     fn refresh_preview_now(&self) {
     let _prof = crate::ui::prof::span("refresh_preview_now");
-        self.sync_open_tags();
-        self.refresh_tag_chips();
         let view_mode = self.state.borrow().view_mode;
         let Some(path) = self.focused_path() else {
             self.clear_picture();
@@ -3167,7 +3195,6 @@ impl Ctx {
             return;
         }
         if view_mode != ViewMode::Preview {
-            self.refresh_backlinks();
             return;
         }
         let Some(text) = self.buffer_text(&path) else {
@@ -3187,6 +3214,13 @@ impl Ctx {
         );
         self.arm_preview(false);
         self.widgets.preview.load_html(&html, None);
+    }
+
+    /// Теги, ссылки и граф текущего файла. Один вызов на переход или паузу в наборе.
+    fn refresh_side_panels(&self) {
+        let _prof = crate::ui::prof::span("refresh_side_panels");
+        self.sync_open_tags();
+        self.refresh_tag_chips();
         self.refresh_backlinks();
         self.relayout_graph();
     }
@@ -3213,24 +3247,27 @@ impl Ctx {
         let Some(pin) = self.pin_path() else {
             return;
         };
-        let paths: Vec<PathBuf> = self
+        let gen = self.state.borrow().links_gen;
+        // Только файлы, изменившиеся с прошлой синхронизации.
+        let stale: Vec<(PathBuf, u64)> = self
             .state
             .borrow()
             .buffers
-            .keys()
-            .filter(|path| path.starts_with(&pin) && is_markdown(path))
-            .cloned()
+            .iter()
+            .filter(|(path, _)| path.starts_with(&pin) && is_markdown(path))
+            .filter(|(_, entry)| entry.tags_synced != Some((entry.rev.get(), gen)))
+            .map(|(path, entry)| (path.clone(), entry.rev.get()))
             .collect();
-        let tagged: Vec<(PathBuf, Vec<String>)> = paths
-            .into_iter()
-            .filter_map(|path| {
-                let text = self.buffer_text(&path)?;
-                Some((path, markdown::extract_tags(&text)))
-            })
-            .collect();
-        let mut state = self.state.borrow_mut();
-        for (path, tags) in tagged {
+        for (path, rev) in stale {
+            let Some(text) = self.buffer_text(&path) else {
+                continue;
+            };
+            let tags = markdown::extract_tags(&text);
+            let mut state = self.state.borrow_mut();
             state.index.set_file_tags(&path, tags);
+            if let Some(entry) = state.buffers.get_mut(&path) {
+                entry.tags_synced = Some((rev, gen));
+            }
         }
     }
 
@@ -3239,33 +3276,88 @@ impl Ctx {
         let Some(active) = self.pin_path() else {
             return;
         };
-        let wiki_files = self.state.borrow().index.files.clone();
-        let paths: Vec<PathBuf> = self
+        let gen = self.state.borrow().links_gen;
+        let stale: Vec<(PathBuf, u64)> = self
             .state
             .borrow()
             .buffers
-            .keys()
-            .filter(|path| is_markdown(path) && index::is_within(&active, path))
-            .cloned()
+            .iter()
+            .filter(|(path, _)| is_markdown(path) && index::is_within(&active, path))
+            .filter(|(_, entry)| entry.links_synced != Some((entry.rev.get(), gen)))
+            .map(|(path, entry)| (path.clone(), entry.rev.get()))
             .collect();
-        let linked: Vec<(PathBuf, Vec<PathBuf>)> = paths
-            .into_iter()
-            .filter_map(|path| {
-                let text = self.buffer_text(&path)?;
-                Some((
-                    path.clone(),
-                    index::outgoing_targets(&text, &path, &active, &wiki_files),
-                ))
-            })
-            .collect();
-        let mut state = self.state.borrow_mut();
-        for (path, targets) in linked {
+        if stale.is_empty() {
+            return;
+        }
+        let wiki_files = self.state.borrow().index.files.clone();
+        for (path, rev) in stale {
+            let Some(text) = self.buffer_text(&path) else {
+                continue;
+            };
+            let targets = index::outgoing_targets(&text, &path, &active, &wiki_files);
+            let mut state = self.state.borrow_mut();
             state.index.set_file_outgoing(&path, targets);
+            if let Some(entry) = state.buffers.get_mut(&path) {
+                entry.links_synced = Some((rev, gen));
+            }
         }
     }
 
     fn outgoing_of_note(&self, path: &Path) -> Vec<PathBuf> {
     let _prof = crate::ui::prof::span("outgoing_of_note");
+        let key = {
+            let state = self.state.borrow();
+            state
+                .buffers
+                .get(path)
+                .map(|entry| (entry.rev.get(), state.links_gen))
+        };
+        if let Some((rev, gen)) = key {
+            let cached = self.state.borrow().buffers.get(path).and_then(|entry| {
+                entry
+                    .outgoing_cache
+                    .as_ref()
+                    .filter(|(r, g, _)| *r == rev && *g == gen)
+                    .map(|(_, _, list)| list.clone())
+            });
+            if let Some(list) = cached {
+                return list;
+            }
+            let list = self.outgoing_of_note_uncached(path);
+            if let Some(entry) = self.state.borrow_mut().buffers.get_mut(path) {
+                entry.outgoing_cache = Some((rev, gen, list.clone()));
+            }
+            return list;
+        }
+        self.outgoing_of_note_uncached(path)
+    }
+
+    /// Для замеров: кеш исходящих совпадает с пересчётом, индекс знает те же
+    /// ссылки, и связан ли `probe` с текущим файлом входящей ссылкой.
+    pub(super) fn links_report(&self, probe: &Path) -> String {
+        let Some(path) = self.focused_path() else {
+            return "нет файла".into();
+        };
+        let cached = self.outgoing_of_note(&path);
+        let fresh = self.outgoing_of_note_uncached(&path);
+        let indexed = self.state.borrow().index.outgoing_of(&path).to_vec();
+        let linked = self
+            .state
+            .borrow()
+            .index
+            .incoming_of(probe)
+            .iter()
+            .any(|item| item == &path);
+        format!(
+            "cache_ok {} index_ok {} out {} probe_linked {linked}",
+            cached == fresh,
+            indexed == fresh,
+            fresh.len()
+        )
+    }
+
+    /// Каждая ссылка проверяется на диске (stat), поэтому результат кешируется.
+    fn outgoing_of_note_uncached(&self, path: &Path) -> Vec<PathBuf> {
         let Some(active) = self.pin_path() else {
             return Vec::new();
         };
@@ -3357,6 +3449,7 @@ impl Ctx {
                     if state.scope_building.as_deref() == Some(scope.as_path()) {
                         state.scope_building = None;
                         state.scope_graph = Some((scope.clone(), built));
+                        state.links_gen += 1;
                     }
                     drop(state);
                     ctx.refresh_backlinks();
@@ -3629,8 +3722,7 @@ impl Ctx {
 
     fn refresh_links(&self) {
         self.refresh_preview_now();
-        self.refresh_backlinks();
-        self.relayout_graph();
+        self.refresh_side_panels();
     }
 
     fn schedule_search(&self) {
@@ -3700,12 +3792,15 @@ impl Ctx {
     let _prof = crate::ui::prof::span("reindex");
         let Some(pin) = self.pin_path() else {
             self.state.borrow_mut().index = index::LinkIndex::default();
+            self.state.borrow_mut().links_gen += 1;
             self.refresh_links();
             return;
         };
         let gen = {
             let mut state = self.state.borrow_mut();
             state.index_gen = state.index_gen.wrapping_add(1);
+            // Сменился пин или пересобирается индекс: кеши ссылок устарели.
+            state.links_gen += 1;
             state.index_gen
         };
         self.set_status("Строится индекс пространства");
@@ -3720,6 +3815,7 @@ impl Ctx {
                     if ctx.state.borrow().index_gen == gen {
                         let truncated = built.truncated;
                         ctx.state.borrow_mut().index = built;
+                        ctx.state.borrow_mut().links_gen += 1;
                         ctx.refresh_links();
                         if truncated {
                             ctx.set_status("Индекс обрезан: слишком много Markdown-файлов");

@@ -179,6 +179,17 @@ impl Ctx {
         let ctx = self.clone();
         let identity = Rc::new(RefCell::new(path.to_path_buf()));
         let watch_id = identity.clone();
+        // Счётчик правок текста. Кеши ссылок и тегов сверяются с ним. Вставка
+        // и удаление якорей таблиц (U+FFFC) текст файла не меняют и не считаются.
+        let rev = Rc::new(std::cell::Cell::new(0u64));
+        let bump = rev.clone();
+        buffer.connect_insert_text(move |_, _, _| bump.set(bump.get().wrapping_add(1)));
+        let bump = rev.clone();
+        buffer.connect_delete_range(move |_, start, end| {
+            if start.slice(end).chars().any(|c| c != '\u{FFFC}') {
+                bump.set(bump.get().wrapping_add(1));
+            }
+        });
         buffer.connect_changed(move |_| {
             if ctx.state.borrow().loading || ctx.state.borrow().render.writing {
                 return;
@@ -219,6 +230,10 @@ impl Ctx {
                 identity,
                 monitor,
                 render_hooked: false,
+                rev,
+                links_synced: None,
+                tags_synced: None,
+                outgoing_cache: None,
             },
         );
         self.apply_text_zoom_tags();
@@ -327,6 +342,9 @@ impl Ctx {
         };
         self.state.borrow_mut().buffers.remove(dest);
         *entry.identity.borrow_mut() = dest.to_path_buf();
+        entry.links_synced = None;
+        entry.tags_synced = None;
+        entry.outgoing_cache = None;
         entry.dirty = false;
         entry.last_saved = text.to_string();
         entry.acked_external = None;
