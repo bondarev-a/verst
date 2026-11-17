@@ -164,6 +164,16 @@ pub(super) fn after_activate(ctx: &Ctx) {
             ms(blocked),
             ms(max_gap)
         );
+        let renderer = ctx
+            .widgets
+            .window
+            .renderer()
+            .map(|r| r.type_().name().to_string())
+            .unwrap_or_default();
+        eprintln!(
+            "PROF renderer {renderer} (GSK_RENDERER={})",
+            std::env::var("GSK_RENDERER").unwrap_or_default()
+        );
         print_totals("PROF", &take_totals());
         start_bench(ctx);
     });
