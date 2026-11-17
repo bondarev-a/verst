@@ -190,6 +190,9 @@ enum Step {
     Type(usize),
     Report(String),
     Split(String),
+    Scroll,
+    CursorShot,
+    TableLeave(std::path::PathBuf),
     Quit,
 }
 
@@ -207,6 +210,24 @@ fn start_bench(ctx: Ctx) {
         for file in &files {
             steps.push(Step::Go(file.clone(), round));
         }
+    }
+    if let Some(scroll) = std::env::var_os("VERST_BENCH_SCROLL") {
+        for path in std::env::split_paths(&scroll) {
+            steps.push(Step::Go(path, 0));
+            steps.push(Step::Scroll);
+            steps.push(Step::Report("scroll".to_string()));
+        }
+    }
+    if let Some(pair) = std::env::var_os("VERST_BENCH_TABLE_LEAVE") {
+        let paths: Vec<_> = std::env::split_paths(&pair).collect();
+        if paths.len() == 2 {
+            steps.push(Step::Go(paths[0].clone(), 0));
+            steps.push(Step::TableLeave(paths[1].clone()));
+        }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_CURSOR") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::CursorShot);
     }
     if let Some(split) = std::env::var_os("VERST_BENCH_SPLIT") {
         let path = std::path::PathBuf::from(split);
@@ -257,6 +278,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 );
                 print_totals("PROF   ", &take_totals());
                 eprintln!("PROF lists {}", ctx.lists_report());
+                if std::env::var_os("VERST_MARKUP").is_some() {
+                    eprintln!("PROF markup {}", ctx.markup_report());
+                }
                 if round == 1 {
                     save_shot(&ctx, &format!("{name}"));
                 }
@@ -278,6 +302,67 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 );
                 print_totals("PROF   ", &take_totals());
                 run_steps(ctx, steps);
+            });
+        }
+        Step::Scroll => {
+            take_totals();
+            reset_stall();
+            scroll_stress(ctx, steps, 0, 0);
+        }
+        Step::TableLeave(next) => {
+            let view = ctx.focused_view();
+            let buffer = view.buffer();
+            let mut line = 0;
+            while line < buffer.line_count() {
+                let Some(start) = buffer.iter_at_line(line) else { break };
+                let mut end = start.clone();
+                end.forward_to_line_end();
+                if buffer.text(&start, &end, true).starts_with("| ") {
+                    break;
+                }
+                line += 1;
+            }
+            if let Some(iter) = buffer.iter_at_line(line + 3) {
+                buffer.place_cursor(&iter);
+            }
+            let typed = ctx.bench_type_in_cell("МЕТКА_ЯЧЕЙКИ");
+            let from = ctx.focused_path();
+            ctx.go(next.clone(), None);
+            glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                let editable = ctx.focused_view().is_editable();
+                let here = ctx.focused_path().and_then(|p| ctx.buffer_text(&p)).unwrap_or_default();
+                let there = from.as_ref().and_then(|p| ctx.buffer_text(p)).unwrap_or_default();
+                eprintln!(
+                    "PROF table_leave: typed {typed}, cell_active_after {}, editable {editable}, mark_in_old {}, mark_in_new {}",
+                    ctx.any_table_cell_focused(),
+                    there.contains("МЕТКА_ЯЧЕЙКИ"),
+                    here.contains("МЕТКА_ЯЧЕЙКИ")
+                );
+                run_steps(ctx, steps);
+            });
+        }
+        Step::CursorShot => {
+            let view = ctx.focused_view();
+            let buffer = view.buffer();
+            let mut line = buffer.line_count() / 2;
+            while line < buffer.line_count() {
+                let Some(start) = buffer.iter_at_line(line) else { break };
+                let mut end = start.clone();
+                end.forward_to_line_end();
+                let text = buffer.text(&start, &end, true);
+                if text.starts_with("- **") {
+                    break;
+                }
+                line += 1;
+            }
+            if let Some(mut iter) = buffer.iter_at_line(line) {
+                buffer.place_cursor(&iter);
+                view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.5);
+            }
+            glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                eprintln!("PROF cursor line {line}");
+                save_shot(&ctx, "cursor");
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || run_steps(ctx, steps));
             });
         }
         Step::Split(label) => {
@@ -375,4 +460,45 @@ fn shoot(ctx: &Ctx, name: &str) -> bool {
             false
         }
     }
+}
+
+/// Прокрутка вниз и вверх с курсором на каждой строке-шаге и правкой текста:
+/// служебные символы на строке курсора то показываются, то прячутся.
+fn scroll_stress(ctx: Ctx, steps: Vec<Step>, tick: u32, line: i32) {
+    let view = ctx.focused_view();
+    let buffer = view.buffer();
+    let total = buffer.line_count();
+    let (next, done) = if tick < 400 {
+        let down = (tick / 100) % 2 == 0;
+        let step = if down { 29 } else { -23 };
+        let mut next = line + step;
+        if next >= total {
+            next = total - 1;
+        }
+        if next < 0 {
+            next = 0;
+        }
+        (next, false)
+    } else {
+        (line, true)
+    };
+    if done {
+        run_steps(ctx, steps);
+        return;
+    }
+    if let Some(mut iter) = buffer.iter_at_line(next) {
+        buffer.place_cursor(&iter);
+        view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.3);
+        if tick % 17 == 0 {
+            buffer.insert(&mut iter, "z");
+            let mut a = buffer.iter_at_mark(&buffer.get_insert());
+            let b = a.clone();
+            a.backward_char();
+            let (mut a, mut b) = (a, b);
+            buffer.delete(&mut a, &mut b);
+        }
+    }
+    glib::timeout_add_local_once(Duration::from_millis(12), move || {
+        scroll_stress(ctx, steps, tick + 1, next);
+    });
 }
