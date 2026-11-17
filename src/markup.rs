@@ -27,6 +27,10 @@ pub enum MarkKind {
     Link {
         dest: String,
     },
+    /// Вики-ссылка `[[цель]]` или `[[цель|подпись]]`. Видна подпись или цель.
+    WikiLink {
+        target: String,
+    },
     /// Обрамление ссылки или картинки, скрываемое вне строки курсора.
     LinkMarkup,
 }
@@ -221,7 +225,60 @@ pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
             _ => {}
         }
     }
+    let code: Vec<(usize, usize)> = out
+        .iter()
+        .filter(|span| matches!(span.kind, MarkKind::Code | MarkKind::CodeBlock))
+        .map(|span| (span.start, span.end))
+        .collect();
+    wiki_spans(source, &code, &mut out);
     out
+}
+
+/// pulldown-cmark не знает `[[…]]`, поэтому вики-ссылки ищутся отдельно,
+/// вне кода. Ссылка не переносится на другую строку.
+fn wiki_spans(source: &str, code: &[(usize, usize)], out: &mut Vec<MarkSpan>) {
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    while let Some(found) = source[at..].find("[[") {
+        let start = at + found;
+        let Some(close) = source[start + 2..].find("]]") else {
+            break;
+        };
+        let inner_start = start + 2;
+        let inner_end = inner_start + close;
+        let end = inner_end + 2;
+        let inner = &source[inner_start..inner_end];
+        let in_code = code.iter().any(|(a, b)| start < *b && end > *a);
+        if inner.contains('\n') || inner.contains('[') {
+            at = start + 1;
+            continue;
+        }
+        at = end;
+        if in_code || inner.trim().is_empty() || bytes.get(end) == Some(&b']') {
+            continue;
+        }
+        let (target, shown) = match inner.find('|') {
+            Some(bar) => (&inner[..bar], inner_start + bar + 1),
+            None => (inner, inner_start),
+        };
+        out.push(MarkSpan {
+            kind: MarkKind::LinkMarkup,
+            start,
+            end: shown,
+        });
+        out.push(MarkSpan {
+            kind: MarkKind::LinkMarkup,
+            start: inner_end,
+            end,
+        });
+        out.push(MarkSpan {
+            kind: MarkKind::WikiLink {
+                target: target.trim().to_string(),
+            },
+            start,
+            end,
+        });
+    }
 }
 
 fn push_text(stack: &mut [Frame], range: std::ops::Range<usize>) {
@@ -363,5 +420,59 @@ mod tests {
         assert!(spans
             .iter()
             .any(|s| matches!(&s.kind, MarkKind::Image { dest } if dest == "./x.png")));
+    }
+
+    fn markup_of(source: &str, spans: &[MarkSpan]) -> Vec<String> {
+        spans
+            .iter()
+            .filter(|s| s.kind == MarkKind::LinkMarkup)
+            .map(|s| source[s.start..s.end].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn wiki_link_hides_brackets() {
+        let source = "См. [[Заметка]] тут.\n";
+        let spans = mark_spans(source);
+        assert_eq!(markup_of(source, &spans), vec!["[[", "]]"]);
+        let link = spans
+            .iter()
+            .find(|s| matches!(s.kind, MarkKind::WikiLink { .. }))
+            .unwrap();
+        assert_eq!(&source[link.start..link.end], "[[Заметка]]");
+        assert_eq!(
+            link.kind,
+            MarkKind::WikiLink {
+                target: "Заметка".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn wiki_link_with_alias_shows_alias() {
+        let source = "[[папка/цель|подпись]]\n";
+        let spans = mark_spans(source);
+        assert_eq!(markup_of(source, &spans), vec!["[[папка/цель|", "]]"]);
+        assert!(spans.iter().any(
+            |s| matches!(&s.kind, MarkKind::WikiLink { target } if target == "папка/цель")
+        ));
+    }
+
+    #[test]
+    fn wiki_link_inside_code_is_text() {
+        let source = "`[[код]]`\n\n```\n[[блок]]\n```\n";
+        let spans = mark_spans(source);
+        assert!(!spans
+            .iter()
+            .any(|s| matches!(s.kind, MarkKind::WikiLink { .. })));
+    }
+
+    #[test]
+    fn broken_wiki_links_are_skipped() {
+        let source = "[[]] и [[раз\nдва]] и [[a[b]]\n";
+        let spans = mark_spans(source);
+        assert!(!spans
+            .iter()
+            .any(|s| matches!(s.kind, MarkKind::WikiLink { .. })));
     }
 }

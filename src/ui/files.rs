@@ -21,6 +21,12 @@ impl Ctx {
         if path.is_dir() {
             return;
         }
+        // Активная ячейка таблицы принадлежит уходящему файлу. Пока он ещё в
+        // фокусе, записать её в свой файл и снять блокировку ввода; иначе новый
+        // файл оставался только для чтения, а набранное в ячейке терялось.
+        if self.focused_path().as_deref() != Some(path.as_path()) && self.any_table_cell_focused() {
+            self.deactivate_table_cells();
+        }
         let text_file = kind::is_text(&path);
         if text_file {
             if let Err(message) = self.ensure_buffer(&path) {
@@ -212,6 +218,7 @@ impl Ctx {
                 acked_external: None,
                 identity,
                 monitor,
+                render_hooked: false,
             },
         );
         self.apply_text_zoom_tags();

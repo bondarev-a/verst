@@ -173,6 +173,8 @@ struct BufferEntry {
     // Монитор хранится здесь: если его сбросить, наблюдение за файлом прекратится.
     #[allow(dead_code)]
     monitor: Option<gio::FileMonitor>,
+    /// Обработчики курсора и правок для рендера уже подключены к этому буферу.
+    render_hooked: bool,
 }
 
 pub(super) struct State {

@@ -51,7 +51,6 @@ pub(super) struct RenderState {
     tick: u64,
     tables: Vec<LiveTable>,
     images: Vec<LiveImage>,
-    cursor_hooked: Vec<*const sourceview5::Buffer>,
     /// Разбор текущего текста. Курсор его не пересчитывает.
     spans: Vec<MarkSpan>,
     line_starts: Vec<usize>,
@@ -163,15 +162,20 @@ impl Ctx {
                 };
                 let spans = ctx.state.borrow().render.spans.clone();
                 for span in &spans {
-                    if let MarkKind::Link { dest } = &span.kind {
-                        if offset >= span.start && offset < span.end {
+                    if offset < span.start || offset >= span.end {
+                        continue;
+                    }
+                    match &span.kind {
+                        MarkKind::Link { dest } => {
                             if let Some(target) = markdown::resolve_markdown(&path, dest) {
                                 ctx.go(target, None);
                             }
-                            gesture.set_state(gtk4::EventSequenceState::Claimed);
-                            return;
                         }
+                        MarkKind::WikiLink { target } => ctx.pick_wiki(target),
+                        _ => continue,
                     }
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    return;
                 }
             });
             view.add_controller(click);
@@ -262,7 +266,7 @@ impl Ctx {
             return;
         };
         self.ensure_render_tags(&buffer);
-        self.ensure_cursor_hook(&buffer);
+        self.ensure_cursor_hook(&path, &buffer);
         let cursor_line = buffer.iter_at_mark(&buffer.get_insert()).line();
         if self.any_table_cell_focused() {
             if self.render_owns(&path) {
@@ -295,6 +299,56 @@ impl Ctx {
         if self.scroll_editor_to_line(line) {
             self.state.borrow_mut().pending_view_line = None;
         }
+    }
+
+    /// Для замеров: какие теги стоят на первых служебных `##` вне строки курсора.
+    pub(super) fn markup_report(&self) -> String {
+        let Some(path) = self.focused_path() else {
+            return "нет файла".into();
+        };
+        let Some(buffer) = self.state.borrow().buffers.get(&path).map(|e| e.buffer.clone()) else {
+            return "нет буфера".into();
+        };
+        let cursor = buffer.iter_at_mark(&buffer.get_insert()).line();
+        let mut out = Vec::new();
+        for line in 0..buffer.line_count() {
+            if out.len() >= 2 || line == cursor {
+                continue;
+            }
+            let Some(iter) = buffer.iter_at_line(line) else { continue };
+            let mut end = iter.clone();
+            end.forward_chars(3);
+            if !buffer.text(&iter, &end, true).starts_with("##") {
+                continue;
+            }
+            let tags: Vec<String> = iter
+                .tags()
+                .iter()
+                .map(|t| {
+                    let name = t.name().map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+                    let fg = if t.is_foreground_set() {
+                        t.foreground_rgba().map(|c| format!("{:.2},{:.2},{:.2},{:.2}", c.red(), c.green(), c.blue(), c.alpha())).unwrap_or_default()
+                    } else {
+                        "-".into()
+                    };
+                    format!("{name}[p{} fg {fg}]", t.priority())
+                })
+                .collect();
+            out.push(format!("line {line}: {}", tags.join(" ")));
+        }
+        format!("tag_table {} | {}", buffer.tag_table().size(), out.join(" || "))
+    }
+
+    /// Для замеров: вписать текст в активную ячейку таблицы.
+    pub(super) fn bench_type_in_cell(&self, text: &str) -> bool {
+        let Some((table, row, col)) = self.focused_table_cell() else {
+            return false;
+        };
+        let Some(entry) = self.table_entry(table, row, col) else {
+            return false;
+        };
+        entry.set_text(text);
+        true
     }
 
     /// Для замеров: таблиц, сеток второй панели, из них показанных.
@@ -978,7 +1032,7 @@ impl Ctx {
         bar.set_margin_start(cell_caret_pixel_x(entry, caret).max(0));
     }
 
-    fn deactivate_table_cells(&self) {
+    pub(super) fn deactivate_table_cells(&self) {
         if let Some((table, row, col)) = self.focused_table_cell() {
             self.commit_active_cell(table, row, col);
         }
@@ -1397,19 +1451,20 @@ impl Ctx {
         }
     }
 
-    fn ensure_cursor_hook(&self, buffer: &sourceview5::Buffer) {
-        let ptr = buffer as *const sourceview5::Buffer;
-        if self
-            .state
-            .borrow()
-            .render
-            .cursor_hooked
-            .iter()
-            .any(|item| *item == ptr)
+    /// Раньше подключённые буферы запоминались по адресу локальной ссылки
+    /// (`buffer as *const _`), то есть по адресу на стеке. Он совпадал у разных
+    /// буферов, и курсор раскрывал разметку только в первом раскрашенном файле.
+    fn ensure_cursor_hook(&self, path: &Path, buffer: &sourceview5::Buffer) {
         {
-            return;
+            let mut state = self.state.borrow_mut();
+            let Some(entry) = state.buffers.get_mut(path) else {
+                return;
+            };
+            if entry.render_hooked || &entry.buffer != buffer {
+                return;
+            }
+            entry.render_hooked = true;
         }
-        self.state.borrow_mut().render.cursor_hooked.push(ptr);
         let ctx = self.clone();
         buffer.connect_insert_text(move |buffer, _, _| {
             if ctx.state.borrow().render.writing {
@@ -2018,7 +2073,9 @@ fn paint_tags(
                 jobs.push((span.start, span.end, TAG_CODEBLOCK));
                 jobs.push((span.start, span.end, TAG_MONO));
             }
-            MarkKind::Link { .. } => jobs.push((span.start, span.end, TAG_LINK)),
+            MarkKind::Link { .. } | MarkKind::WikiLink { .. } => {
+                jobs.push((span.start, span.end, TAG_LINK))
+            }
             MarkKind::Image { .. } => {}
         }
     }
@@ -2191,7 +2248,9 @@ fn retag_cursor_line(
                 pieces.push((piece_start, piece_end, TAG_CODEBLOCK));
                 pieces.push((piece_start, piece_end, TAG_MONO));
             }
-            MarkKind::Link { .. } => pieces.push((piece_start, piece_end, TAG_LINK)),
+            MarkKind::Link { .. } | MarkKind::WikiLink { .. } => {
+                pieces.push((piece_start, piece_end, TAG_LINK))
+            }
             MarkKind::Image { .. } if !on_cursor => {
                 pieces.push((piece_start, piece_end, TAG_HIDE));
             }
@@ -2343,11 +2402,16 @@ fn clear_render_tags(buffer: &sourceview5::Buffer) {
     }
 }
 
-/// Служебный текст только прозрачный. invisible и scale≈0 ломают кэш строк
-/// GTK при прокрутке (gtktextbtree / gtktextlinedisplaycache).
+/// Служебный текст скрыт по-настоящему (invisible): не рисуется и не занимает
+/// места. Прозрачный цвет GTK не учитывает, символы оставались видны цветом
+/// подсветки синтаксиса. Падение при прокрутке, из-за которого от invisible
+/// отказывались, давали якоря таблиц из чужого буфера (исправлено отдельно);
+/// стресс-прокрутка с правками на invisible падений не даёт. scale≈0 по-прежнему
+/// нельзя: ломает кэш строк GTK.
 fn hide_source(tag: &gtk4::TextTag) {
     tag.set_scale(1.0);
     tag.set_foreground_rgba(Some(&gtk4::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0)));
+    tag.set_invisible(true);
 }
 
 /// Исходник таблицы прячется без scale≈0: иначе GtkGrid наследует масштаб
