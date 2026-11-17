@@ -12,6 +12,9 @@ use gtk4::prelude::*;
 
 fn main() -> gtk4::glib::ExitCode {
     ui::prof_mark_main();
+    // Без аппаратного 3D GTK рисует через программный Vulkan, и запуск
+    // почти вдвое дольше. Тогда cairo, если пользователь не выбрал сам.
+    text_workspace::graphics::prefer_cairo_without_gpu();
     // Профиль AppArmor закрывает только /usr/bin/verst. Локальная копия
     // иначе падает сразу: bwrap не может создать user namespace.
     if std::env::current_exe().ok().as_deref() != Some(std::path::Path::new("/usr/bin/verst")) {
