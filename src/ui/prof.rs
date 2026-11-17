@@ -189,6 +189,7 @@ enum Step {
     Go(std::path::PathBuf, usize),
     Type(usize),
     Report(String),
+    Split(String),
     Quit,
 }
 
@@ -206,6 +207,12 @@ fn start_bench(ctx: Ctx) {
         for file in &files {
             steps.push(Step::Go(file.clone(), round));
         }
+    }
+    if let Some(split) = std::env::var_os("VERST_BENCH_SPLIT") {
+        let path = std::path::PathBuf::from(split);
+        steps.push(Step::Go(path, 0));
+        steps.push(Step::Split("split-on".to_string()));
+        steps.push(Step::Split("split-off".to_string()));
     }
     if let Some(typing) = std::env::var_os("VERST_BENCH_TYPE") {
         let path = std::path::PathBuf::from(typing);
@@ -272,6 +279,27 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 run_steps(ctx, steps);
             });
         }
+        Step::Split(label) => {
+            take_totals();
+            reset_stall();
+            let t0 = Instant::now();
+            ctx.toggle_split();
+            let sync = t0.elapsed();
+            glib::timeout_add_local_once(Duration::from_millis(settle_ms()), move || {
+                let (blocked, max_gap) = read_stall();
+                eprintln!(
+                    "PROF {label}: sync {:>8.1} ms | blocked {:>8.1} ms | max_gap {:>8.1} ms",
+                    ms(sync),
+                    ms(blocked),
+                    ms(max_gap)
+                );
+                print_totals("PROF   ", &take_totals());
+                let (tables, second, mapped) = ctx.table_grid_report();
+                eprintln!("PROF {label}: tables {tables}, pane2 grids {second}, mapped {mapped}");
+                save_shot(&ctx, &label);
+                run_steps(ctx, steps);
+            });
+        }
         Step::Quit => {
             eprintln!("PROF done");
             ctx.save_session_now();
@@ -298,14 +326,30 @@ fn type_chars(ctx: Ctx, steps: Vec<Step>, left: usize) {
     });
 }
 
-/// Снимок окна в PNG, если задан VERST_SHOT_DIR.
+/// Снимок окна в PNG, если задан VERST_SHOT_DIR. Пока окно не разложено, повторяет.
 fn save_shot(ctx: &Ctx, name: &str) {
-    let Some(dir) = std::env::var_os("VERST_SHOT_DIR") else {
+    if std::env::var_os("VERST_SHOT_DIR").is_none() {
         return;
+    }
+    try_shot(ctx.clone(), name.to_string(), 0);
+}
+
+fn try_shot(ctx: Ctx, name: String, attempt: u32) {
+    if shoot(&ctx, &name) || attempt >= 10 {
+        return;
+    }
+    glib::timeout_add_local_once(Duration::from_millis(100), move || {
+        try_shot(ctx, name, attempt + 1);
+    });
+}
+
+fn shoot(ctx: &Ctx, name: &str) -> bool {
+    let Some(dir) = std::env::var_os("VERST_SHOT_DIR") else {
+        return true;
     };
     let window = &ctx.widgets.window;
     let Some(root) = window.child() else {
-        return;
+        return false;
     };
     let width = root.width();
     let height = root.height();
@@ -313,15 +357,21 @@ fn save_shot(ctx: &Ctx, name: &str) {
     let snapshot = gtk4::Snapshot::new();
     gtk4::gdk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(width), f64::from(height));
     let Some(node) = snapshot.to_node() else {
-        return;
+        return false;
     };
     let Some(renderer) = window.renderer() else {
-        return;
+        return false;
     };
     let texture = renderer.render_texture(&node, None);
     let path = std::path::Path::new(&dir).join(format!("{name}.png"));
     match texture.save_to_png(&path) {
-        Ok(()) => eprintln!("PROF shot {}", path.display()),
-        Err(error) => eprintln!("PROF shot failed: {error}"),
+        Ok(()) => {
+            eprintln!("PROF shot {}", path.display());
+            true
+        }
+        Err(error) => {
+            eprintln!("PROF shot failed: {error}");
+            false
+        }
     }
 }
