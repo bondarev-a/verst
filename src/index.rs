@@ -154,12 +154,14 @@ pub fn build_index(pin: &Path) -> LinkIndex {
     let mut incoming: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     let mut file_tags: HashMap<PathBuf, Vec<String>> = HashMap::new();
     let mut tag_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    // Таблица имён для вики-ссылок строится один раз на весь проход.
+    let lookup = markdown::WikiLookup::new(&files);
     for file in &files {
         let Ok(text) = fs::read_to_string(file) else {
             continue;
         };
         let text = markdown::strip_bom(&text);
-        let targets = outgoing_targets(text, file, pin, &files);
+        let targets = outgoing_with(text, file, pin, &lookup);
         for target in &targets {
             incoming
                 .entry(target.clone())
@@ -270,10 +272,19 @@ pub fn outgoing_targets(
     scope: &Path,
     markdown_files: &[PathBuf],
 ) -> Vec<PathBuf> {
+    outgoing_with(text, from, scope, &markdown::WikiLookup::new(markdown_files))
+}
+
+fn outgoing_with(
+    text: &str,
+    from: &Path,
+    scope: &Path,
+    lookup: &markdown::WikiLookup,
+) -> Vec<PathBuf> {
     let from_norm = markdown::normalize(from.to_path_buf());
     let mut targets = Vec::new();
     for link in markdown::extract_links(text) {
-        let Some(path) = resolve_outgoing(&link, &from_norm, scope, markdown_files) else {
+        let Some(path) = resolve_outgoing(&link, &from_norm, scope, lookup) else {
             continue;
         };
         if path == from_norm
@@ -292,7 +303,7 @@ fn resolve_outgoing(
     link: &markdown::RawLink,
     from: &Path,
     scope: &Path,
-    files: &[PathBuf],
+    lookup: &markdown::WikiLookup,
 ) -> Option<PathBuf> {
     match link.kind {
         markdown::LinkKind::Markdown => {
@@ -300,7 +311,7 @@ fn resolve_outgoing(
             locate_file(&path)
         }
         markdown::LinkKind::Wiki => {
-            let matches = markdown::resolve_wiki(&link.target, scope, files);
+            let matches = lookup.resolve(&link.target, scope);
             if matches.len() > 1 {
                 return None;
             }

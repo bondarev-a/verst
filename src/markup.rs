@@ -28,6 +28,7 @@ pub enum MarkKind {
         dest: String,
     },
     /// Вики-ссылка `[[цель]]` или `[[цель|подпись]]`. Видна подпись или цель.
+    /// `target` — всё до `|`, вместе с `#раздел`; части даёт `markdown::wiki_parts`.
     WikiLink {
         target: String,
     },
@@ -253,48 +254,35 @@ fn spans_of(source: &str) -> Vec<MarkSpan> {
 }
 
 /// pulldown-cmark не знает `[[…]]`, поэтому вики-ссылки ищутся отдельно,
-/// вне кода. Ссылка не переносится на другую строку.
+/// вне кода, тем же разбором, что и в предпросмотре и индексе.
 fn wiki_spans(source: &str, code: &[(usize, usize)], out: &mut Vec<MarkSpan>) {
-    let bytes = source.as_bytes();
     let mut at = 0;
     while let Some(found) = source[at..].find("[[") {
         let start = at + found;
-        let Some(close) = source[start + 2..].find("]]") else {
-            break;
-        };
-        let inner_start = start + 2;
-        let inner_end = inner_start + close;
-        let end = inner_end + 2;
-        let inner = &source[inner_start..inner_end];
-        let in_code = code.iter().any(|(a, b)| start < *b && end > *a);
-        if inner.contains('\n') || inner.contains('[') {
+        let Some(link) = crate::markdown::wiki_at(source, start) else {
             at = start + 1;
             continue;
-        }
-        at = end;
-        if in_code || inner.trim().is_empty() || bytes.get(end) == Some(&b']') {
+        };
+        at = link.end;
+        if code.iter().any(|(a, b)| start < *b && link.end > *a) {
             continue;
         }
-        let (target, shown) = match inner.find('|') {
-            Some(bar) => (&inner[..bar], inner_start + bar + 1),
-            None => (inner, inner_start),
-        };
         out.push(MarkSpan {
             kind: MarkKind::LinkMarkup,
             start,
-            end: shown,
+            end: link.shown,
         });
         out.push(MarkSpan {
             kind: MarkKind::LinkMarkup,
-            start: inner_end,
-            end,
+            start: link.end - 2,
+            end: link.end,
         });
         out.push(MarkSpan {
             kind: MarkKind::WikiLink {
-                target: target.trim().to_string(),
+                target: link.parts.link.to_string(),
             },
             start,
-            end,
+            end: link.end,
         });
     }
 }
@@ -474,6 +462,24 @@ mod tests {
         assert!(spans.iter().any(
             |s| matches!(&s.kind, MarkKind::WikiLink { target } if target == "папка/цель")
         ));
+    }
+
+    #[test]
+    fn wiki_link_with_section_keeps_it_in_target() {
+        let source = "[[Заметка#Раздел|подпись]] и [[#Здесь]]\n";
+        let spans = mark_spans(source);
+        assert_eq!(
+            markup_of(source, &spans),
+            vec!["[[Заметка#Раздел|", "]]", "[[", "]]"]
+        );
+        let targets: Vec<&str> = spans
+            .iter()
+            .filter_map(|s| match &s.kind {
+                MarkKind::WikiLink { target } => Some(target.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets, vec!["Заметка#Раздел", "#Здесь"]);
     }
 
     #[test]
