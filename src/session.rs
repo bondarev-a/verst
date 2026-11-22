@@ -118,7 +118,10 @@ pub struct Session {
     #[serde(default)]
     pub note_tag: Option<String>,
     /// Порядок вкладок слева. Пустой список дополняется обычным порядком.
-    #[serde(default)]
+    /// Ключ новый: под `left_order` старые версии записывали порядок по
+    /// умолчанию своего времени (при чтении он отбрасывался), и его возврат
+    /// сдвинул бы панель «Открытые» на старое место у всех обновившихся.
+    #[serde(default, rename = "left_tab_order")]
     pub left_order: Vec<String>,
     #[serde(default)]
     pub right_order: Vec<String>,
@@ -353,7 +356,7 @@ impl Session {
             seams::canonical_panel(PanelSide::Right, &self.right_panel, self.right_page);
         self.left_page = seams::panel_index(&self.left_panel).unwrap_or(0);
         self.right_page = seams::panel_index(&self.right_panel).unwrap_or(0);
-        self.left_order = seams::ordered_ids(PanelSide::Left, &[]);
+        self.left_order = seams::ordered_ids(PanelSide::Left, &self.left_order);
         self.right_order = seams::ordered_ids(PanelSide::Right, &self.right_order);
         self.note_group = crate::notes::note_group(&self.note_group)
             .as_str()
@@ -614,6 +617,38 @@ mod tests {
         assert_eq!(session.nav_width, 280);
         let session = Session::from_json(r#"{"word_wrap":true}"#).unwrap();
         assert!(session.word_wrap);
+    }
+
+    #[test]
+    fn left_tab_order_survives_a_restart() {
+        let mut session = Session::from_json("{}").unwrap();
+        session.left_order = ["notes", "disk", "history", "open", "workspace"]
+            .map(String::from)
+            .to_vec();
+        session.right_order = vec!["outline".to_string()];
+        let text = serde_json::to_string(&session).unwrap();
+        let back = Session::from_json(&text).unwrap();
+        assert_eq!(
+            back.left_order,
+            ["notes", "disk", "history", "open", "workspace"]
+        );
+        assert_eq!(back.right_order[0], "outline");
+        // Неизвестные вкладки отбрасываются, недостающие дописываются в конец.
+        let back = Session::from_json(r#"{"left_tab_order":["история","history","notes"]}"#)
+            .unwrap();
+        assert_eq!(
+            back.left_order,
+            ["history", "notes", "open", "disk", "workspace"]
+        );
+        // Порядок под старым ключом — не выбор пользователя, а умолчание старой версии.
+        let old = Session::from_json(
+            r#"{"left_order":["disk","workspace","notes","open","history"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old.left_order,
+            ["open", "disk", "workspace", "notes", "history"]
+        );
     }
 
     #[test]
