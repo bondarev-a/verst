@@ -281,6 +281,12 @@ fn start_bench(ctx: Ctx) {
         for (row, col) in [(0, 0), (1, 0), (1, 1), (2, 3)] {
             steps.push(Step::Caret(row, col));
         }
+        // Масштаб меняется, когда курсоры уже созданы.
+        for _ in 0..3 {
+            steps.push(Step::Action("text_zoom_in".to_string()));
+        }
+        steps.push(Step::Caret(1, 1));
+        steps.push(Step::Caret(0, 0));
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
