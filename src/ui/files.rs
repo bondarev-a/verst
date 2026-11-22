@@ -121,8 +121,27 @@ impl Ctx {
         }
     }
 
-    pub(super) fn close_file(&self, path: &Path) {
+    /// Закрыть файл. Изменения сначала записываются; если записать не
+    /// удалось, файл остаётся открытым и возвращается `false`.
+    pub(super) fn close_file(&self, path: &Path) -> bool {
     let _prof = crate::ui::prof::span("close_file");
+        if self.focused_path().as_deref() == Some(path) && self.any_table_cell_focused() {
+            self.deactivate_table_cells();
+        }
+        if self
+            .state
+            .borrow()
+            .buffers
+            .get(path)
+            .is_some_and(|entry| entry.dirty)
+            && !self.write_file(path, false)
+        {
+            self.set_status(&format!(
+                "Файл не закрыт: не удалось записать {}",
+                path.display()
+            ));
+            return false;
+        }
         self.drop_render_for_path(path);
         for pane in 0..2 {
             let shows = self
@@ -136,15 +155,6 @@ impl Ctx {
             if shows.as_deref() == Some(path) {
                 self.widgets.views[pane].set_buffer(Some(&self.widgets.empty_buffer));
             }
-        }
-        if self
-            .state
-            .borrow()
-            .buffers
-            .get(path)
-            .is_some_and(|entry| entry.dirty)
-        {
-            self.write_file(path, false);
         }
         {
             let mut state = self.state.borrow_mut();
@@ -163,6 +173,7 @@ impl Ctx {
         self.refresh_open_list();
         self.follow_focus();
         self.save_session();
+        true
     }
 
     pub(super) fn ensure_buffer(&self, path: &Path) -> Result<(), String> {
@@ -443,10 +454,11 @@ impl Ctx {
         self.state.borrow_mut().autosave.insert(path, id);
     }
 
-    pub(super) fn write_file(&self, path: &Path, from_autosave: bool) {
+    /// Записать буфер в файл. `false` — запись не удалась, текст есть только в памяти.
+    pub(super) fn write_file(&self, path: &Path, from_autosave: bool) -> bool {
     let _prof = crate::ui::prof::span("write_file");
         let Some(text) = self.buffer_text(path) else {
-            return;
+            return true;
         };
         let dirty = self
             .state
@@ -455,14 +467,14 @@ impl Ctx {
             .get(path)
             .is_some_and(|entry| entry.dirty);
         if from_autosave && !dirty {
-            return;
-        }
-        if let Some(entry) = self.state.borrow_mut().buffers.get_mut(path) {
-            entry.last_saved = text.clone();
+            return true;
         }
         match write_atomic(path, &text) {
             Ok(()) => {
                 if let Some(entry) = self.state.borrow_mut().buffers.get_mut(path) {
+                    // Только после успешной записи: иначе сверка с диском
+                    // считала бы несохранённый текст сохранённым.
+                    entry.last_saved = text;
                     entry.dirty = false;
                     entry.acked_external = None;
                 }
@@ -476,9 +488,32 @@ impl Ctx {
                 } else {
                     self.set_status("Сохранено");
                 }
+                true
             }
-            Err(error) => self.set_status(&format!("Не удалось записать файл: {error}")),
+            Err(error) => {
+                self.set_status(&format!("Не удалось записать файл: {error}"));
+                false
+            }
         }
+    }
+
+    /// Записать все изменённые файлы. Возвращает те, что записать не удалось.
+    pub(super) fn write_all_dirty(&self) -> Vec<PathBuf> {
+        if self.any_table_cell_focused() {
+            self.deactivate_table_cells();
+        }
+        let dirty: Vec<PathBuf> = self
+            .state
+            .borrow()
+            .buffers
+            .iter()
+            .filter(|(_, entry)| entry.dirty)
+            .map(|(path, _)| path.clone())
+            .collect();
+        dirty
+            .into_iter()
+            .filter(|path| !self.write_file(path, false))
+            .collect()
     }
 
     pub(super) fn on_disk_changed(&self, path: &Path) {

@@ -382,8 +382,8 @@ impl Ctx {
                 .iter()
                 .flatten()
                 .any(|open| open == path);
-        if opened {
-            self.close_file(path);
+        if opened && !self.close_file(path) {
+            return;
         }
         if let Err(error) = fs::remove_file(path) {
             self.set_status(&format!("Не удалось удалить заметку: {error}"));
@@ -519,11 +519,11 @@ impl Ctx {
         }
         let line = self.caret_line(path);
         let open = self.file_is_open(path);
-        if open {
-            self.close_file(path);
+        if open && !self.close_file(path) {
+            return;
         }
-        if self.file_is_open(dest) {
-            self.close_file(dest);
+        if self.file_is_open(dest) && !self.close_file(dest) {
+            return;
         }
         if let Err(error) = move_file(path, dest) {
             self.set_status(&format!("Не удалось перенести заметку: {error}"));

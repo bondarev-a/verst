@@ -1343,9 +1343,21 @@ impl Ctx {
         });
         self.widgets.nav_path.add_controller(escape);
         let ctx = self.clone();
+        // Правки за последние AUTOSAVE_MS ещё не записаны. Если записать не
+        // удалось, окно не закрывается; повторное закрытие — без сохранения.
+        let refused = Rc::new(Cell::new(false));
         self.widgets.window.connect_close_request(move |_| {
+            let failed = ctx.write_all_dirty();
             ctx.save_session_now();
-            glib::Propagation::Proceed
+            if failed.is_empty() || refused.replace(true) {
+                return glib::Propagation::Proceed;
+            }
+            let names: Vec<String> = failed.iter().map(|p| p.display().to_string()).collect();
+            ctx.set_status(&format!(
+                "Не удалось записать: {}. Закройте окно ещё раз, чтобы выйти без сохранения.",
+                names.join(", ")
+            ));
+            glib::Propagation::Stop
         });
         let ctx = self.clone();
         self.widgets

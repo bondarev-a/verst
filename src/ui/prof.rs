@@ -216,6 +216,8 @@ enum Step {
     Resize(i32),
     Drag(i32, i32),
     Caret(usize, usize),
+    /// Вставить метку в текст и сразу закрыть окно, как Ctrl+Q.
+    TypeAndClose,
     Quit,
 }
 
@@ -287,6 +289,10 @@ fn start_bench(ctx: Ctx) {
         }
         steps.push(Step::Caret(1, 1));
         steps.push(Step::Caret(0, 0));
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_TYPE_CLOSE") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::TypeAndClose);
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -602,6 +608,12 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 save_shot(&ctx, &label);
                 run_steps(ctx, steps);
             });
+        }
+        Step::TypeAndClose => {
+            let buffer = ctx.focused_view().buffer();
+            buffer.insert_at_cursor("МЕТКА_ВЫХОДА ");
+            eprintln!("PROF type_and_close: inserted, closing");
+            ctx.widgets.window.close();
         }
         Step::Quit => {
             eprintln!("PROF done");

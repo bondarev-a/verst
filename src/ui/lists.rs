@@ -122,7 +122,9 @@ impl Ctx {
             close.set_tooltip_text(Some("Закрыть файл"));
             let ctx = self.clone();
             let close_path = path.clone();
-            close.connect_clicked(move |_| ctx.close_file(&close_path));
+            close.connect_clicked(move |_| {
+                ctx.close_file(&close_path);
+            });
             let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
             line.add_css_class("file-row");
             line.set_tooltip_text(Some(&path.display().to_string()));
