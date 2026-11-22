@@ -125,6 +125,11 @@ pub fn prefer_cairo_without_gpu() -> bool {
     let software = software_graphics();
     if software {
         std::env::set_var("GSK_RENDERER", "cairo");
+        // Для cairo GDK не нужны OpenGL и Vulkan, но он всё равно загружает
+        // драйверы Mesa (libLLVM, libgallium): около 80 МБ RSS с первого кадра.
+        if std::env::var_os("GDK_DISABLE").is_none() {
+            std::env::set_var("GDK_DISABLE", "gl,vulkan");
+        }
     }
     software
 }
