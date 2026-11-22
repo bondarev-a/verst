@@ -2084,17 +2084,35 @@ pub(super) fn install_launcher_icon() -> Option<PathBuf> {
     // Ubuntu Dock keeps the first pixmap for a path, and paints transparent
     // pixels on white. A new file is what actually reaches the tray.
     let icon_path = icon_dir.join("verstgem.png");
-    let desktop_dir = home.join(".local/share/applications");
-    let desktop_path = desktop_dir.join("local.textworkspace.desktop");
     fs::create_dir_all(&icon_dir).ok()?;
-    fs::create_dir_all(&desktop_dir).ok()?;
     if fs::read(&theme_icon).ok().as_deref() != Some(LAUNCHER_ICON) {
         fs::write(&theme_icon, LAUNCHER_ICON).ok()?;
     }
     if fs::read(&icon_path).ok().as_deref() != Some(LAUNCHER_ICON) {
         fs::write(&icon_path, LAUNCHER_ICON).ok()?;
     }
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("text_workspace"));
+    let exe = std::env::current_exe().ok();
+    if exe.as_deref().is_some_and(|exe| owns_user_launcher(exe, &home)) {
+        write_user_launcher(&home, exe.as_deref().unwrap_or(Path::new("verst")), &icon_path);
+    }
+    Some(icon_path)
+}
+
+/// Ярлык в ~/.local ведёт только копия, которую ставит установщик для
+/// пользователя (~/.local/bin/verst). У системного пакета ярлык свой, в
+/// /usr/share/applications. Раньше ярлык переписывала любая запущенная
+/// копия — отладочная сборка или файл из временной папки, — и меню потом
+/// запускало её вместо установленной программы.
+fn owns_user_launcher(exe: &Path, home: &Path) -> bool {
+    exe == home.join(".local/bin/verst")
+}
+
+fn write_user_launcher(home: &Path, exe: &Path, icon_path: &Path) {
+    let desktop_dir = home.join(".local/share/applications");
+    let desktop_path = desktop_dir.join("local.textworkspace.desktop");
+    if fs::create_dir_all(&desktop_dir).is_err() {
+        return;
+    }
     // Песочницу WebKit программа выключает сама, только если bwrap её не
     // создаёт (text_workspace::sandbox). Раньше ярлык выключал её всегда.
     let exec = format!("{} %U", desktop_exec_arg(&exe.display().to_string()));
@@ -2113,13 +2131,18 @@ StartupWMClass=local.textworkspace\n\
 Keywords=markdown;notes;editor;\n",
         icon = icon_path.display(),
     );
-    if fs::read_to_string(&desktop_path).ok().as_deref() != Some(desktop.as_str()) {
-        fs::write(&desktop_path, &desktop).ok()?;
+    if fs::read_to_string(&desktop_path).ok().as_deref() == Some(desktop.as_str()) {
+        return;
+    }
+    if fs::write(&desktop_path, &desktop).is_err() {
+        return;
+    }
+    // Обновление базы ярлыков — в фоне, окно его не ждёт.
+    std::thread::spawn(move || {
         let _ = std::process::Command::new("update-desktop-database")
             .arg(&desktop_dir)
             .status();
-    }
-    Some(icon_path)
+    });
 }
 
 pub(super) fn scroll_top_for_line(line_top: f64, page: f64, upper: f64) -> f64 {
@@ -2245,6 +2268,15 @@ mod tests {
         assert!(write_atomic(&path, &big).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "старый текст");
         let _ = fs::remove_file(&filler);
+    }
+
+    #[test]
+    fn only_user_install_owns_the_launcher() {
+        let home = Path::new("/home/u");
+        assert!(owns_user_launcher(Path::new("/home/u/.local/bin/verst"), home));
+        assert!(!owns_user_launcher(Path::new("/usr/bin/verst"), home));
+        assert!(!owns_user_launcher(Path::new("/home/u/src/verst/target/release/text_workspace"), home));
+        assert!(!owns_user_launcher(Path::new("/tmp/verst"), home));
     }
 
     #[test]
