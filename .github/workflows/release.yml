@@ -4,19 +4,26 @@ on:
   push:
     branches: [main]
 
+# Права на запись — только у задачи, которая выкладывает релиз.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   package:
     name: Собрать и выложить deb
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
+      # Действия закреплены по коммиту, а не по тегу или ветке: тег можно
+      # перевесить на чужой код, коммит — нет.
       - name: Код
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
 
       - name: Заголовки GTK
         run: |
@@ -50,9 +57,14 @@ jobs:
             echo
             echo "sudo apt install ./verst_${version}_amd64.deb"
           } > "$notes"
+          # Контрольная сумма пакета для проверки после скачивания.
+          sums="packaging/out/SHA256SUMS"
+          (cd packaging/out && sha256sum "verst_${version}_amd64.deb") > "$sums"
+          echo "SHA256: $(cut -d' ' -f1 "$sums")" >> "$notes"
+          # Выпущенный пакет не перезаписывается: раньше push без смены
+          # версии молча подменял .deb в уже опубликованном релизе.
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" --clobber
-            gh release edit "$tag" --notes-file "$notes"
+            echo "::notice::Релиз ${tag} уже есть, пакет не перезаписан. Чтобы выпустить изменения, поднимите версию."
           else
-            gh release create "$tag" "$asset" --title "Verst ${version}" --notes-file "$notes"
+            gh release create "$tag" "$asset" "$sums" --title "Verst ${version}" --notes-file "$notes"
           fi
