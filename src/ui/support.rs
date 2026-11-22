@@ -2200,3 +2200,18 @@ mod tests {
         assert_eq!(anchor_line_at(510, 10, Some(522)), 10);
     }
 }
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// Вернуть системе память, которую освободили, но malloc держит у себя.
+/// После удаления сеток таблиц это 10–15 МБ.
+pub(super) fn release_freed_memory() {
+    let _prof = crate::ui::prof::span("malloc_trim");
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        malloc_trim(0);
+    }
+}

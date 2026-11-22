@@ -109,17 +109,37 @@ fn virgl_bit(features: &str) -> bool {
     features.trim().starts_with('1')
 }
 
+static SOFTWARE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// В системе нет аппаратного 3D. Считается один раз за запуск.
+pub fn software_graphics() -> bool {
+    *SOFTWARE.get_or_init(|| scan_cards().is_some_and(|cards| software_only(&cards)))
+}
+
 /// Если пользователь не задал GSK_RENDERER и аппаратного 3D нет, выбрать cairo.
 /// Вызывать до создания приложения GTK. Возвращает, был ли выбран cairo.
 pub fn prefer_cairo_without_gpu() -> bool {
     if std::env::var_os("GSK_RENDERER").is_some() {
         return false;
     }
-    let software = scan_cards().is_some_and(|cards| software_only(&cards));
+    let software = software_graphics();
     if software {
         std::env::set_var("GSK_RENDERER", "cairo");
     }
     software
+}
+
+/// Без аппаратного 3D WebKit рисует предпросмотр через программный OpenGL
+/// (llvmpipe): процесс страницы держит LLVM и около 180 МБ частной памяти.
+/// Без GPU-композитинга — около 60 МБ, страница рисуется процессором.
+/// Настройка WebView hardware-acceleration-policy в WebKitGTK 6 этого
+/// не выключает, поэтому переменная окружения. Вызывать до создания WebView.
+pub fn lighten_webkit_without_gpu() -> bool {
+    if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some() || !software_graphics() {
+        return false;
+    }
+    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    true
 }
 
 #[cfg(test)]

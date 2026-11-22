@@ -1739,7 +1739,12 @@ impl Ctx {
             )
         };
         self.drop_embeds(&old_tables, &old_images);
+        let freed = !old_tables.is_empty() || !old_images.is_empty();
         { let _p = crate::ui::prof::span("rw:free_old_widgets"); drop(old_tables); drop(old_images); }
+        if freed {
+            // Освобождённые сетки таблиц malloc сам системе не отдаёт.
+            glib::idle_add_local_once(super::support::release_freed_memory);
+        }
 
         paint_tags(buffer, &text, &spans, cursor_line, &md_tables);
 
@@ -2015,13 +2020,18 @@ fn build_table_grid(
             overlay.add_controller(grab);
             let ctx_menu = ctx.clone();
             let path_menu = path.to_path_buf();
-            let anchor_menu = overlay.clone();
             let right = gtk4::GestureClick::new();
             right.set_button(3);
             right.connect_pressed(move |gesture, _, _, _| {
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
+                // Виджет берётся у жеста. Сильная ссылка на ячейку внутри её же
+                // обработчика замыкала круг: ячейка держит жест, жест — ячейку,
+                // и сетки таблиц не освобождались после ухода с файла.
+                let Some(anchor) = gesture.widget() else {
+                    return;
+                };
                 ctx_menu.show_table_menu(
-                    anchor_menu.upcast_ref(),
+                    &anchor,
                     path_menu.clone(),
                     table_index,
                     row,
