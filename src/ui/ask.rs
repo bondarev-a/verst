@@ -706,19 +706,5 @@ fn clip(text: &str, limit: usize) -> String {
 }
 
 fn excerpt(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut end = flat.len();
-    let mut count = 0;
-    for (index, _) in flat.char_indices() {
-        if count == 80 {
-            end = index;
-            break;
-        }
-        count += 1;
-    }
-    if end < flat.len() {
-        format!("{}…", &flat[..end])
-    } else {
-        flat
-    }
+    clip(text, 80)
 }

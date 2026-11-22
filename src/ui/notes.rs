@@ -8,7 +8,7 @@ use gtk4::prelude::*;
 use text_workspace::markdown;
 use text_workspace::notes;
 
-use super::support::{file_icon, is_markdown, write_atomic};
+use super::support::{file_icon, is_markdown, same_file, write_atomic};
 use super::Ctx;
 
 impl Ctx {
@@ -818,16 +818,6 @@ fn scrolled_list(child: &impl IsA<gtk4::Widget>) -> gtk4::ScrolledWindow {
         .vexpand(true)
         .min_content_height(180)
         .build()
-}
-
-fn same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }
 
 fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {

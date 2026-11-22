@@ -896,7 +896,7 @@ impl Ctx {
     fn table_insert_row(&self, path: PathBuf, table: usize, row: usize, col: usize, below: bool) {
         let at = if below { row } else { row.saturating_sub(1) };
         let focus_row = if below { row + 1 } else { row.max(1) };
-        self.apply_table_edit(&path, table, (table, focus_row, col), |text| {
+        self.apply_table_edit(&path, (table, focus_row, col), |text| {
             tables::insert_row_at(text, table, at)
         });
     }
@@ -906,7 +906,7 @@ impl Ctx {
             self.set_status("Заголовок таблицы не удаляется");
             return;
         }
-        self.apply_table_edit(&path, table, (table, row - 1, col), |text| {
+        self.apply_table_edit(&path, (table, row - 1, col), |text| {
             tables::delete_row_at(text, table, row)
         });
     }
@@ -921,13 +921,13 @@ impl Ctx {
     ) {
         let at = if right { col + 1 } else { col };
         let focus_col = at;
-        self.apply_table_edit(&path, table, (table, row, focus_col), |text| {
+        self.apply_table_edit(&path, (table, row, focus_col), |text| {
             tables::insert_column_at(text, table, at)
         });
     }
 
     fn table_delete_column(&self, path: PathBuf, table: usize, row: usize, col: usize) {
-        self.apply_table_edit(&path, table, (table, row, col.saturating_sub(1)), |text| {
+        self.apply_table_edit(&path, (table, row, col.saturating_sub(1)), |text| {
             tables::delete_column_at(text, table, col)
         });
     }
@@ -935,7 +935,6 @@ impl Ctx {
     fn apply_table_edit(
         &self,
         path: &Path,
-        _table: usize,
         focus: (usize, usize, usize),
         edit: impl FnOnce(&str) -> Option<String>,
     ) {
@@ -1885,7 +1884,7 @@ impl Ctx {
             // Раньше такие строки оставались со старыми тегами.
             let changed = changed_lines(&old_sigs, &new_sigs);
             if changed.len() > 400 {
-                paint_tags(buffer, &text, &spans, cursor_line, &md_tables);
+                paint_tags(buffer, &text, &spans, cursor_line);
             } else {
                 for line in changed {
                     if line != cursor_line
@@ -1973,7 +1972,7 @@ impl Ctx {
             glib::idle_add_local_once(super::support::release_freed_memory);
         }
 
-        paint_tags(buffer, &text, &spans, cursor_line, &md_tables);
+        paint_tags(buffer, &text, &spans, cursor_line);
 
         let cursor_range = line_byte_range(&text, cursor_line);
         let mut placements: Vec<Placement> = md_tables
@@ -1989,7 +1988,6 @@ impl Ctx {
                 if !line_contains(cursor_range, span.start) {
                     placements.push(Placement::Image {
                         start: span.start,
-                        end: span.end,
                         dest: dest.clone(),
                     });
                 }
@@ -2111,8 +2109,8 @@ impl Ctx {
         let split = self.state.borrow().session.split;
         let wanted = [self.pane_shows(0, buffer), split && self.pane_shows(1, buffer)];
         let grids = [
-            wanted[0].then(|| build_table_grid(self, path, table, index, focus_cell.clone())),
-            wanted[1].then(|| build_table_grid(self, path, table, index, focus_cell.clone())),
+            wanted[0].then(|| build_table_grid(self, path, table, index)),
+            wanted[1].then(|| build_table_grid(self, path, table, index)),
         ];
         for (pane, grid) in grids.iter().enumerate() {
             let Some(grid) = grid else {
@@ -2199,7 +2197,6 @@ enum Placement {
     },
     Image {
         start: usize,
-        end: usize,
         dest: String,
     },
 }
@@ -2217,7 +2214,6 @@ fn build_table_grid(
     path: &Path,
     table: &MdTable,
     table_index: usize,
-    _focus_cell: Rc<RefCell<Option<(usize, usize)>>>,
 ) -> gtk4::Grid {
     let _prof = crate::ui::prof::span("build_table_grid");
     let grid = gtk4::Grid::new();
@@ -2386,7 +2382,6 @@ fn paint_tags(
     text: &str,
     spans: &[MarkSpan],
     cursor_line: i32,
-    _tables: &[MdTable],
 ) {
     let _prof = crate::ui::prof::span("paint_tags");
     clear_render_tags(buffer);

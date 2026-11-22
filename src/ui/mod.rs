@@ -1494,9 +1494,12 @@ impl Ctx {
                 ctx.state.borrow_mut().session.note_tags_open = fold.is_expanded();
                 ctx.save_session();
             });
+        // Состояние хранится в замыкании, а не угадывается по надписи кнопки.
         let ctx = self.clone();
+        let expanded = Rc::new(Cell::new(false));
         self.widgets.notes_tags_all.connect_clicked(move |button| {
-            let show_all = button.label().as_deref() != Some("Три строки");
+            let show_all = !expanded.get();
+            expanded.set(show_all);
             let rows = if show_all { 5 } else { 3 };
             ctx.widgets
                 .notes_tags_scroll

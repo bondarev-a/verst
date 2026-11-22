@@ -2034,6 +2034,17 @@ fn leaf_name<'a>(raw: &'a str, empty: &'static str) -> Result<&'a str, &'static 
     Ok(name)
 }
 
+/// Один и тот же файл, в том числе через разные пути или ссылки.
+pub(super) fn same_file(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 pub(super) fn is_markdown(path: &Path) -> bool {
     matches!(
         path.extension()

@@ -8,7 +8,7 @@ use gtk4::{gio, glib};
 use text_workspace::session::ViewMode;
 use text_workspace::{kind, notes, places};
 
-use super::support::{buffer_text_of, read_text, watch_file, write_atomic};
+use super::support::{buffer_text_of, read_text, same_file, watch_file, write_atomic};
 use super::{BufferEntry, Ctx, AUTOSAVE_MS};
 
 impl Ctx {
@@ -701,12 +701,3 @@ fn guard_undo_steps(ctx: &Ctx, buffer: &sourceview5::Buffer, undo: bool) {
     );
 }
 
-fn same_file(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
