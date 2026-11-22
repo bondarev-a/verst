@@ -70,6 +70,8 @@ pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    // Шапка YAML иначе читается как линия и заголовок второго уровня.
+    options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = Parser::new_ext(source, options).into_offset_iter();
 
     let mut out = Vec::new();
@@ -151,10 +153,11 @@ pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
                     });
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            // Шапка показывается как блок кода: моноширинно, без меток заголовка.
+            Event::Start(Tag::CodeBlock(_)) | Event::Start(Tag::MetadataBlock(_)) => {
                 stack.push(Frame::CodeBlock { full: range });
             }
-            Event::End(TagEnd::CodeBlock) => {
+            Event::End(TagEnd::CodeBlock) | Event::End(TagEnd::MetadataBlock(_)) => {
                 if let Some(Frame::CodeBlock { full }) = pop_code_block(&mut stack) {
                     out.push(MarkSpan {
                         kind: MarkKind::CodeBlock,
@@ -465,6 +468,24 @@ mod tests {
         assert!(!spans
             .iter()
             .any(|s| matches!(s.kind, MarkKind::WikiLink { .. })));
+    }
+
+    #[test]
+    fn frontmatter_is_a_code_block_not_a_heading() {
+        let source = "---\ntags: [проект]\n---\n# Заголовок\n";
+        let spans = mark_spans(source);
+        let headings: Vec<&MarkSpan> = spans
+            .iter()
+            .filter(|s| matches!(s.kind, MarkKind::Heading { .. }))
+            .collect();
+        assert_eq!(headings.len(), 1);
+        assert_eq!(&source[headings[0].start..headings[0].end], "# Заголовок\n");
+        let block = spans
+            .iter()
+            .find(|s| s.kind == MarkKind::CodeBlock)
+            .unwrap();
+        assert_eq!(block.start, 0);
+        assert!(source[block.start..block.end].contains("tags: [проект]"));
     }
 
     #[test]

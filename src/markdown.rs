@@ -25,7 +25,12 @@ pub struct RawLink {
 pub fn headings(source: &str) -> Vec<Heading> {
     let mut out = Vec::new();
     let mut in_fence = false;
-    for (line, raw) in source.lines().enumerate() {
+    // Строки шапки YAML пропускаются: `# комментарий` в ней не заголовок.
+    let skip = match split_frontmatter(source) {
+        (Some(front), _) => front.lines().count(),
+        (None, _) => 0,
+    };
+    for (line, raw) in source.lines().enumerate().skip(skip) {
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
@@ -229,6 +234,9 @@ pub fn render_html(
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    // Шапка YAML (`---` … `---` в начале файла) — метаданные, а не линия и
+    // заголовок второго уровня. В HTML она не выводится, как в Obsidian.
+    options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     // Номер строки события — двоичным поиском по началам строк. Подсчёт `\n`
     // с начала файла на каждое событие был квадратичным: 200 мс на 200 КБ.
     let newlines: Vec<usize> = rewritten
@@ -250,10 +258,18 @@ pub fn render_html(
             ))));
             seen_line = Some(line);
         }
-        if matches!(event, Event::Start(Tag::CodeBlock(_))) {
+        // Внутри кода и шапки якоря строк не вставляются: в коде они стали бы
+        // текстом, а шапку писатель HTML не выводит, кроме сырого HTML.
+        if matches!(
+            event,
+            Event::Start(Tag::CodeBlock(_)) | Event::Start(Tag::MetadataBlock(_))
+        ) {
             in_code = true;
         }
-        let ends_code = matches!(event, Event::End(TagEnd::CodeBlock));
+        let ends_code = matches!(
+            event,
+            Event::End(TagEnd::CodeBlock) | Event::End(TagEnd::MetadataBlock(_))
+        );
         events.push(event);
         if ends_code {
             in_code = false;
@@ -984,6 +1000,22 @@ title: Заметка
         assert!(missing.contains("missing:"));
         assert!(!missing.contains("twmissing:"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frontmatter_is_not_a_heading() {
+        let source = "---\ntags: [проект]\n# комментарий\n---\n# Заголовок\nтекст\n";
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(!html.contains("<hr"));
+        assert!(!html.contains("<h2"));
+        assert!(!html.contains("проект"));
+        assert!(html.contains("<h1>Заголовок</h1>"));
+        assert!(html.contains(r#"id="twl4""#));
+        let found = headings(source);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "Заголовок");
+        assert_eq!(found[0].line, 4);
+        assert_eq!(extract_tags(source), vec!["проект".to_string()]);
     }
 
     #[test]
