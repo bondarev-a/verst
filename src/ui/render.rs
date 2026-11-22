@@ -3286,9 +3286,52 @@ fn skip_word(text: &str, pos: i32, dir: i32) -> i32 {
     }
 }
 
+thread_local! {
+    /// Декодированные картинки по пути и времени изменения файла. Picture
+    /// декодировал файл в главном потоке при каждой перестройке таблиц и
+    /// картинок, при каждом возврате в файл и для каждой панели отдельно.
+    static TEXTURES: RefCell<Vec<(PathBuf, std::time::SystemTime, gtk4::gdk::Texture)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Предел кэша по памяти: несжатая картинка 3000×2000 — это 24 МБ.
+const TEXTURE_CACHE_BYTES: usize = 96 * 1024 * 1024;
+
+fn texture_bytes(texture: &gtk4::gdk::Texture) -> usize {
+    texture.width().max(0) as usize * texture.height().max(0) as usize * 4
+}
+
+fn cached_texture(path: &Path) -> Option<gtk4::gdk::Texture> {
+    let modified = std::fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
+    let hit = TEXTURES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let at = cache.iter().position(|(p, m, _)| p == path && *m == modified)?;
+        let entry = cache.remove(at);
+        let texture = entry.2.clone();
+        cache.push(entry);
+        Some(texture)
+    });
+    if hit.is_some() {
+        return hit;
+    }
+    let texture = gtk4::gdk::Texture::from_file(&gtk4::gio::File::for_path(path)).ok()?;
+    TEXTURES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.retain(|(p, _, _)| p != path);
+        cache.push((path.to_path_buf(), modified, texture.clone()));
+        // Самые давние вон, пока не уложимся; последняя остаётся всегда.
+        while cache.len() > 1
+            && cache.iter().map(|(_, _, t)| texture_bytes(t)).sum::<usize>() > TEXTURE_CACHE_BYTES
+        {
+            cache.remove(0);
+        }
+    });
+    Some(texture)
+}
+
 fn image_widget(path: Option<&Path>) -> gtk4::Widget {
-    if let Some(path) = path.filter(|path| path.is_file()) {
-        let picture = gtk4::Picture::for_filename(path);
+    if let Some(texture) = path.filter(|path| path.is_file()).and_then(cached_texture) {
+        let picture = gtk4::Picture::for_paintable(&texture);
         picture.set_can_shrink(true);
         picture.set_content_fit(gtk4::ContentFit::ScaleDown);
         picture.set_size_request(-1, 120);
