@@ -276,8 +276,14 @@ fn start_bench(ctx: Ctx) {
     if let Some(typing) = std::env::var_os("VERST_BENCH_TYPE") {
         let path = std::path::PathBuf::from(typing);
         steps.push(Step::Go(path.clone(), 0));
-        steps.push(Step::Type(20));
-        steps.push(Step::Report("typing".to_string()));
+        let count = std::env::var("VERST_BENCH_TYPE_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        for _ in 0..std::env::var("VERST_BENCH_TYPE_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize) {
+            steps.push(Step::Type(count));
+            steps.push(Step::Report("typing".to_string()));
+        }
     }
     steps.push(Step::Quit);
     steps.reverse();
@@ -316,6 +322,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 );
                 print_totals("PROF   ", &take_totals());
                 eprintln!("PROF lists {}", ctx.lists_report());
+                if std::env::var_os("VERST_MEM").is_some() {
+                    eprintln!("PROF mem {}", mem_report());
+                }
                 if std::env::var_os("VERST_MARKUP").is_some() {
                     eprintln!("PROF markup {}", ctx.markup_report());
                 }
@@ -338,6 +347,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     ms(blocked),
                     ms(max_gap)
                 );
+                if std::env::var_os("VERST_MEM").is_some() {
+                    eprintln!("PROF mem {}", mem_report());
+                }
                 print_totals("PROF   ", &take_totals());
                 run_steps(ctx, steps);
             });
@@ -365,6 +377,7 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     ctx.widgets.view_toggle.icon_name().unwrap_or_default(),
                     ctx.lists_report()
                 );
+                save_shot(&ctx, &format!("action-{name}-{}", ctx.state.borrow().view_mode.as_str()));
                 run_steps(ctx, steps);
             });
         }
@@ -652,4 +665,31 @@ fn cpu_times_ms() -> (f64, f64, usize) {
         }
     }
     (main, all, threads)
+}
+
+extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// Анонимная память процесса (куча и прочее) до и после возврата свободного malloc.
+fn mem_report() -> String {
+    let anon = || -> f64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find(|line| line.starts_with("RssAnon:"))
+                    .and_then(|line| line.split_whitespace().nth(1)?.parse::<f64>().ok())
+            })
+            .map(|kb| kb / 1024.0)
+            .unwrap_or(0.0)
+    };
+    let before = anon();
+    if std::env::var_os("VERST_MEM_TRIM").is_some() {
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+    let after = anon();
+    format!("rss_anon {before:.1} MB, after trim {after:.1} MB")
 }
