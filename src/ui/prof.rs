@@ -246,6 +246,9 @@ enum Step {
     FindCheck(String),
     /// Удалить быструю заметку и проверить, что она в корзине.
     TrashNote(std::path::PathBuf),
+    /// Удалить открытый файл другой программой, набрать текст и подождать
+    /// автосохранение: файл не должен появиться снова.
+    ExternalDelete,
     Quit,
 }
 
@@ -345,6 +348,10 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
         }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_EXT_DELETE") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::ExternalDelete);
     }
     if let Some(note) = std::env::var_os("VERST_BENCH_TRASH") {
         steps.push(Step::TrashNote(std::path::PathBuf::from(note)));
@@ -791,6 +798,24 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                         original.chars().count(),
                         after.chars().count(),
                         diff
+                    );
+                    run_steps(ctx, steps);
+                });
+            });
+        }
+        Step::ExternalDelete => {
+            let Some(path) = ctx.focused_path() else {
+                run_steps(ctx, steps);
+                return;
+            };
+            let _ = std::fs::remove_file(&path);
+            glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                ctx.focused_view().buffer().insert_at_cursor("правка после удаления ");
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    eprintln!(
+                        "PROF ext_delete: recreated_by_autosave {}, status {:?}",
+                        path.exists(),
+                        ctx.widgets.status.text()
                     );
                     run_steps(ctx, steps);
                 });

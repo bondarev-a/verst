@@ -226,7 +226,8 @@ impl Ctx {
                 last_saved: text,
                 acked_external: None,
                 identity,
-                monitor,
+                _monitor: monitor,
+                gone: false,
                 render_hooked: false,
                 rev,
                 links_synced: None,
@@ -346,7 +347,7 @@ impl Ctx {
         entry.dirty = false;
         entry.last_saved = text.to_string();
         entry.acked_external = None;
-        entry.monitor = watch_file(dest, self.clone());
+        entry._monitor = watch_file(dest, self.clone());
         self.apply_language(&entry.buffer, dest);
         let buffer = entry.buffer.clone();
         self.state
@@ -475,6 +476,9 @@ impl Ctx {
         if from_autosave && self.state.borrow().conflict.as_deref() == Some(path) {
             return true;
         }
+        if from_autosave && self.state.borrow().buffers.get(path).is_some_and(|e| e.gone) {
+            return true;
+        }
         match write_atomic(path, &text) {
             Ok(()) => {
                 if let Some(entry) = self.state.borrow_mut().buffers.get_mut(path) {
@@ -483,6 +487,7 @@ impl Ctx {
                     entry.last_saved = text;
                     entry.dirty = false;
                     entry.acked_external = None;
+                    entry.gone = false;
                 }
                 self.refresh_open_list();
                 self.refresh_file_facts();
@@ -522,6 +527,22 @@ impl Ctx {
             .collect()
     }
 
+    /// Файл удалили или переместили другой программой. Раньше следующее
+    /// автосохранение молча создавало его заново.
+    pub(super) fn on_disk_deleted(&self, path: &Path) {
+        if path.exists() {
+            return;
+        }
+        match self.state.borrow_mut().buffers.get_mut(path) {
+            Some(entry) => entry.gone = true,
+            None => return,
+        }
+        self.set_status(&format!(
+            "Файл удалён на диске: {}. Текст остался в окне; Ctrl+S запишет его снова.",
+            path.display()
+        ));
+    }
+
     pub(super) fn on_disk_changed(&self, path: &Path) {
     let _prof = crate::ui::prof::span("on_disk_changed");
         if self.state.borrow().conflict.is_some() {
@@ -534,6 +555,9 @@ impl Ctx {
         let Ok(disk) = read_text(path) else {
             return;
         };
+        if let Some(entry) = self.state.borrow_mut().buffers.get_mut(path) {
+            entry.gone = false;
+        }
         let Some((buffer_text, last_saved, acked)) =
             self.state.borrow().buffers.get(path).map(|entry| {
                 (

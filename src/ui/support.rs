@@ -1521,6 +1521,8 @@ pub(super) fn watch_file(path: &Path, ctx: Ctx) -> Option<gio::FileMonitor> {
                 | gio::FileMonitorEvent::Renamed
         ) {
             ctx.on_disk_changed(&watch);
+        } else if event == gio::FileMonitorEvent::Deleted {
+            ctx.on_disk_deleted(&watch);
         }
     });
     Some(monitor)

@@ -194,9 +194,11 @@ struct BufferEntry {
     acked_external: Option<String>,
     /// Путь, который видит обработчик правок. «Сохранить как» меняет его, не создавая буфер заново.
     identity: std::rc::Rc<std::cell::RefCell<PathBuf>>,
-    // Монитор хранится здесь: если его сбросить, наблюдение за файлом прекратится.
-    #[allow(dead_code)]
-    monitor: Option<gio::FileMonitor>,
+    /// Монитор хранится здесь: если его сбросить, наблюдение за файлом прекратится.
+    _monitor: Option<gio::FileMonitor>,
+    /// Файл удалён на диске другой программой. Автосохранение его не
+    /// создаёт заново молча; Ctrl+S или закрытие с правками — создают.
+    gone: bool,
     /// Обработчики курсора и правок для рендера уже подключены к этому буферу.
     render_hooked: bool,
     /// Растёт при каждой правке текста. Обработчик правок держит копию Rc.
@@ -3244,6 +3246,7 @@ impl Ctx {
         let started = std::rc::Rc::new(std::cell::Cell::new(false));
         let ctx = self.clone();
         let base_uri = gio::File::for_path(&base).uri();
+        let host_failed = host.clone();
         web.connect_load_changed(move |web, event| {
             if event != webkit6::LoadEvent::Finished || started.replace(true) {
                 return;
@@ -3284,6 +3287,14 @@ impl Ctx {
             });
             *alive.borrow_mut() = Some(operation.clone());
             operation.print();
+        });
+        // Без этого при ошибке загрузки невидимое окно печати оставалось
+        // навсегда, а пользователь не узнавал, что PDF не сохранён.
+        let ctx_failed = self.clone();
+        web.connect_load_failed(move |_, _, _, error| {
+            host_failed.close();
+            ctx_failed.set_status(&format!("Не удалось подготовить PDF: {}", error.message()));
+            false
         });
         web.load_html(&html, Some(&base_uri));
     }
