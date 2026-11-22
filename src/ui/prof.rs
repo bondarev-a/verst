@@ -253,6 +253,8 @@ enum Step {
     QuickOpen,
     /// Переход по вики-ссылке: файл и строка курсора после него.
     WikiJump(String),
+    /// Буфер обмена в ячейке: копировать выделение, вставить две строки.
+    CellClipboard,
     Quit,
 }
 
@@ -355,6 +357,10 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
         }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_CELL_CLIP") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::CellClipboard);
     }
     if let Ok(list) = std::env::var("VERST_BENCH_WIKI") {
         for name in list.split(';').filter(|n| !n.is_empty()) {
@@ -851,6 +857,33 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                         after.chars().count(),
                         diff
                     );
+                    run_steps(ctx, steps);
+                });
+            });
+        }
+        Step::CellClipboard => {
+            ctx.bench_caret_in_cell(0, 1, 0);
+            let Some(entry) = ctx.bench_cell_entry() else {
+                eprintln!("PROF cell_clip: ячейка не активна");
+                run_steps(ctx, steps);
+                return;
+            };
+            entry.set_text("альфа бета");
+            ctx.bench_select_in_cell(&entry, 10, 6);
+            ctx.cell_clipboard(&entry, super::render::CellClip::Copy);
+            let clipboard = entry.clipboard();
+            glib::spawn_future_local(async move {
+                let copied = clipboard.read_text_future().await.ok().flatten();
+                clipboard.set_text("ВСТАВКА\nвторая");
+                ctx.bench_select_in_cell(&entry, 5, 5);
+                ctx.cell_clipboard(&entry, super::render::CellClip::Paste);
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    eprintln!(
+                        "PROF cell_clip: скопировано {:?}, после вставки {:?}",
+                        copied.map(|s| s.to_string()),
+                        entry.text()
+                    );
+                    ctx.deactivate_table_cells();
                     run_steps(ctx, steps);
                 });
             });

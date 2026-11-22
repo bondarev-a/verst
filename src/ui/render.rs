@@ -469,6 +469,18 @@ impl Ctx {
     }
 
     /// Для замеров: вписать текст в активную ячейку таблицы.
+    /// Для замеров: поле активной ячейки.
+    pub(super) fn bench_cell_entry(&self) -> Option<gtk4::Entry> {
+        let (table, row, col) = self.focused_table_cell()?;
+        self.table_entry(table, row, col)
+    }
+
+    /// Для замеров: выделить в активной ячейке символы от anchor до caret.
+    pub(super) fn bench_select_in_cell(&self, entry: &gtk4::Entry, caret: i32, anchor: i32) {
+        self.state.borrow_mut().render.cell_typing = true;
+        self.set_cell_range(entry, caret, anchor);
+    }
+
     pub(super) fn bench_type_in_cell(&self, text: &str) -> bool {
         let Some((table, row, col)) = self.focused_table_cell() else {
             return false;
@@ -1426,6 +1438,23 @@ impl Ctx {
             self.move_table_cell(path, table, row, col, rows, cols, 1, 0);
             return glib::Propagation::Stop;
         }
+        // Буфер обмена в ячейке. Фокус остаётся в основном поле, и раньше
+        // Ctrl+C/X/V уходили туда: поле в это время заблокировано, так что
+        // копирование и вставка в ячейке не работали вовсе.
+        let clip = match keyval {
+            gdk::Key::c | gdk::Key::C if ctrl => Some(CellClip::Copy),
+            gdk::Key::x | gdk::Key::X if ctrl => Some(CellClip::Cut),
+            gdk::Key::v | gdk::Key::V if ctrl => Some(CellClip::Paste),
+            gdk::Key::Insert if ctrl => Some(CellClip::Copy),
+            gdk::Key::Insert if shift => Some(CellClip::Paste),
+            _ => None,
+        };
+        if let Some(action) = clip {
+            if let Some(entry) = self.table_entry(table, row, col) {
+                self.cell_clipboard(&entry, action);
+            }
+            return glib::Propagation::Stop;
+        }
         if ctrl
             && !(keyval == gdk::Key::a
                 || keyval == gdk::Key::A
@@ -1561,6 +1590,73 @@ impl Ctx {
         self.remember_cell_text(&text);
         let (new_text, pos) = splice_chars(&text, start, end, &ch.to_string());
         entry.set_text(&new_text);
+        self.state.borrow_mut().render.cell_typing = true;
+        self.set_cell_range(entry, pos, pos);
+    }
+
+    /// Копирование, вырезание и вставка в активной ячейке. Без выделения
+    /// копируется весь текст ячейки. Перевод строки при вставке заменяется
+    /// пробелом: ячейка однострочная.
+    pub(super) fn cell_clipboard(&self, entry: &gtk4::Entry, action: CellClip) {
+        let clipboard = entry.clipboard();
+        let text = entry.text().to_string();
+        let (caret, anchor, typing) = {
+            let render = &self.state.borrow().render;
+            (render.cell_caret, render.cell_anchor, render.cell_typing)
+        };
+        let selection = text_selection(typing, caret, anchor);
+        let chosen = |(start, end): (i32, i32)| -> String {
+            text.chars()
+                .skip(start as usize)
+                .take((end - start) as usize)
+                .collect()
+        };
+        match action {
+            CellClip::Copy => {
+                let copied = selection
+                    .map(chosen)
+                    .unwrap_or_else(|| text.trim().to_string());
+                clipboard.set_text(&copied);
+            }
+            CellClip::Cut => {
+                let Some(span) = selection else {
+                    return;
+                };
+                clipboard.set_text(&chosen(span));
+                self.remember_cell_text(&text);
+                let (next, pos) = splice_chars(&text, span.0, span.1, "");
+                entry.set_text(&next);
+                self.set_cell_range(entry, pos, pos);
+            }
+            CellClip::Paste => {
+                let ctx = self.clone();
+                let entry = entry.clone();
+                let cell = self.focused_table_cell();
+                glib::spawn_future_local(async move {
+                    let Ok(Some(pasted)) = clipboard.read_text_future().await else {
+                        return;
+                    };
+                    // Пока читали буфер, пользователь мог уйти из ячейки.
+                    if ctx.focused_table_cell() != cell {
+                        return;
+                    }
+                    ctx.insert_into_cell(&entry, &pasted.replace(['\r', '\n'], " "));
+                });
+            }
+        }
+    }
+
+    /// Вставить текст в активную ячейку вместо выделения или у курсора.
+    pub(super) fn insert_into_cell(&self, entry: &gtk4::Entry, insert: &str) {
+        let text = entry.text().to_string();
+        let (caret, anchor, typing) = {
+            let render = &self.state.borrow().render;
+            (render.cell_caret, render.cell_anchor, render.cell_typing)
+        };
+        let (start, end) = text_selection(typing, caret, anchor).unwrap_or((caret, caret));
+        self.remember_cell_text(&text);
+        let (next, pos) = splice_chars(&text, start, end, insert);
+        entry.set_text(&next);
         self.state.borrow_mut().render.cell_typing = true;
         self.set_cell_range(entry, pos, pos);
     }
@@ -3244,6 +3340,13 @@ fn grid_rows(grid: &gtk4::Grid) -> usize {
         rows += 1;
     }
     rows
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CellClip {
+    Copy,
+    Cut,
+    Paste,
 }
 
 fn text_selection(typing: bool, caret: i32, anchor: i32) -> Option<(i32, i32)> {
