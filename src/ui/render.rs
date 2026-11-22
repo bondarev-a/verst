@@ -339,6 +339,30 @@ impl Ctx {
         format!("tag_table {} | {}", buffer.tag_table().size(), out.join(" || "))
     }
 
+    /// Для замеров: сделать ячейку активной и вернуть высоту курсора, высоту
+    /// строки шрифта поля и высоту ячейки.
+    pub(super) fn bench_caret_in_cell(&self, table: usize, row: usize, col: usize) {
+        self.activate_table_cell(table, row, col);
+    }
+
+    pub(super) fn bench_caret_report(&self) -> String {
+        let Some((table, row, col)) = self.focused_table_cell() else {
+            return "нет активной ячейки".into();
+        };
+        let Some(entry) = self.table_entry(table, row, col) else {
+            return "нет поля".into();
+        };
+        let Some(overlay) = entry.parent().and_then(|p| p.downcast::<gtk4::Overlay>().ok()) else {
+            return "нет ячейки".into();
+        };
+        let bar = overlay_caret_bar(&overlay).map(|b| b.height()).unwrap_or(-1);
+        format!(
+            "ячейка ({row},{col}): курсор {bar} px, строка шрифта {} px, ячейка {} px",
+            cell_line_height(&entry),
+            overlay.height()
+        )
+    }
+
     /// Для замеров: вписать текст в активную ячейку таблицы.
     pub(super) fn bench_type_in_cell(&self, text: &str) -> bool {
         let Some((table, row, col)) = self.focused_table_cell() else {
@@ -1044,6 +1068,13 @@ impl Ctx {
             return;
         };
         let caret = self.state.borrow().render.cell_caret;
+        // Масштаб текста мог измениться с прошлого показа.
+        if let Ok(area) = bar.clone().downcast::<gtk4::DrawingArea>() {
+            let line = cell_line_height(entry);
+            if area.content_height() != line {
+                area.set_content_height(line);
+            }
+        }
         bar.set_visible(true);
         // Текст шире ячейки поле ввода прокручивает, и курсор у правого края.
         // Без ограничения нарисованный курсор уезжал в соседнюю ячейку.
@@ -2096,7 +2127,11 @@ fn ensure_cell_entry(
     let bar = gtk4::DrawingArea::new();
     bar.add_css_class("tw-md-caret");
     bar.set_halign(gtk4::Align::Start);
-    bar.set_valign(gtk4::Align::Fill);
+    // Высота курсора — строка шрифта, а не ячейка: с переносом текста строки
+    // таблицы разной высоты, и курсор растягивался на всю ячейку.
+    // По центру, как и однострочное поле ввода (valign Center).
+    bar.set_valign(gtk4::Align::Center);
+    bar.set_content_height(cell_line_height(&entry));
     bar.set_can_target(false);
     bar.set_can_focus(false);
     bar.set_sensitive(false);
@@ -2760,6 +2795,11 @@ fn mark_cell_active(widget: &gtk4::Widget) {
     if let Some(entry) = cell_entry_of(widget) {
         entry.add_css_class("tw-md-cell-active");
     }
+}
+
+/// Высота строки шрифта поля ввода, в пикселях.
+fn cell_line_height(entry: &gtk4::Entry) -> i32 {
+    entry.create_pango_layout(Some("Ag")).pixel_size().1.max(1)
 }
 
 fn cell_caret_pixel_x(entry: &gtk4::Entry, index: i32) -> i32 {

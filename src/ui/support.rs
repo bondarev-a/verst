@@ -24,8 +24,6 @@ entry.tw-md-cell * {
 .tw-md-caret {
     color: @theme_fg_color;
     min-width: 2px;
-    margin-top: 6px;
-    margin-bottom: 6px;
 }
 entry.tw-md-cell.tw-md-cell-active,
 entry.tw-md-cell.tw-md-cell-active text,
@@ -438,8 +436,6 @@ window.verst textview.tw-editor entry.tw-md-cell > text {
 window.verst .tw-md-caret {
     color: @theme_fg_color;
     min-width: 2px;
-    margin-top: 6px;
-    margin-bottom: 6px;
 }
 window.verst entry.tw-md-cell:focus,
 window.verst entry.tw-md-cell.tw-md-cell-active,
