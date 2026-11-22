@@ -211,6 +211,12 @@ pub(super) struct State {
     scope_building: Option<PathBuf>,
     loading: bool,
     dock_adjust: bool,
+    /// Ширина разделителей при прошлом сдвиге. Если она другая, сдвиг сделало
+    /// окно (сужение), а не пользователь, и ширину панели сохранять нельзя.
+    main_total: i32,
+    right_total: i32,
+    /// Возврат панелей к сохранённой ширине уже запланирован.
+    dock_restore: bool,
     conflict_open: bool,
     autosave: HashMap<PathBuf, glib::SourceId>,
     session_save: Option<glib::SourceId>,
@@ -853,7 +859,10 @@ impl Ctx {
         main.set_start_child(Some(&left_shell));
         main.set_end_child(Some(&right_paned));
         main.set_position(280);
-        main.set_resize_start_child(true);
+        // При изменении окна ширину меняет только центр. Боковые панели
+        // держат свою ширину: раньше они делили прибавку с центром, а при
+        // сужении отдавали больше (центр упирался в минимум) и расползались.
+        main.set_resize_start_child(false);
         main.set_resize_end_child(true);
         main.set_shrink_start_child(false);
         main.set_shrink_end_child(false);
@@ -1109,6 +1118,9 @@ impl Ctx {
                 scope_building: None,
                 loading: false,
                 dock_adjust: false,
+                main_total: 0,
+                right_total: 0,
+                dock_restore: false,
                 conflict_open: false,
                 autosave: HashMap::new(),
                 session_save: None,
@@ -1514,6 +1526,9 @@ impl Ctx {
                     }
                     return;
                 }
+                if ctx.window_moved_divider(paned, true) {
+                    return;
+                }
                 let position = paned.position();
                 let floor = ctx.nav_floor(paned);
                 if position < floor {
@@ -1543,6 +1558,9 @@ impl Ctx {
                     }
                     return;
                 }
+                if ctx.window_moved_divider(paned, false) {
+                    return;
+                }
                 let total = paned.width();
                 if total < 200 {
                     return;
@@ -1559,6 +1577,14 @@ impl Ctx {
                 ctx.state.borrow_mut().session.info_width = width;
                 ctx.save_session();
             });
+        // Ширина окна изменилась: вернуть панели к сохранённой ширине,
+        // насколько хватает места. max-position меняется вместе с шириной.
+        for paned in [&self.widgets.main_paned, &self.widgets.right_paned] {
+            let ctx = self.clone();
+            paned.connect_notify_local(Some("max-position"), move |_, _| {
+                ctx.schedule_dock_restore();
+            });
+        }
         let ctx = self.clone();
         self.widgets.right_paned.connect_map(move |_| {
             let ctx = ctx.clone();
@@ -4175,7 +4201,8 @@ impl Ctx {
         // Минимальная ширина — это width-request, а не текущая.
         // shrink выключен: ниже минимума панель не сдвигается за край окна.
         self.widgets.main_paned.set_shrink_start_child(false);
-        self.widgets.main_paned.set_resize_start_child(open);
+        // Навигация не растёт и не сжимается вместе с окном (см. сборку main).
+        self.widgets.main_paned.set_resize_start_child(false);
         if let Some(shell) = self
             .widgets
             .left_notebook
@@ -4460,12 +4487,84 @@ impl Ctx {
         }
         let paned = self.widgets.right_paned.clone();
         paned.set_resize_start_child(true);
-        paned.set_resize_end_child(open);
+        // Блок «О файле» держит свою ширину при изменении окна.
+        paned.set_resize_end_child(false);
         paned.set_shrink_end_child(false);
         let total = paned.width();
         if total > end + 200 {
             self.place_paned(&paned, total - end);
         }
+    }
+
+    /// Сдвиг разделителя вызван изменением ширины окна, а не перетаскиванием.
+    fn window_moved_divider(&self, paned: &gtk4::Paned, main: bool) -> bool {
+        let total = paned.width();
+        let mut state = self.state.borrow_mut();
+        let last = if main {
+            &mut state.main_total
+        } else {
+            &mut state.right_total
+        };
+        let moved = *last != total;
+        *last = total;
+        moved
+    }
+
+    fn schedule_dock_restore(&self) {
+        if self.state.borrow().loading || self.state.borrow().dock_restore {
+            return;
+        }
+        self.state.borrow_mut().dock_restore = true;
+        let ctx = self.clone();
+        // Не во время раскладки: позицию меняем после неё.
+        glib::idle_add_local_once(move || {
+            ctx.state.borrow_mut().dock_restore = false;
+            ctx.restore_dock_widths();
+        });
+    }
+
+    /// Вернуть боковым панелям сохранённую ширину. Если места меньше,
+    /// GTK сам ограничит позицию минимумами соседей; ширина в сессии
+    /// при этом не меняется.
+    fn restore_dock_widths(&self) {
+        let (nav_open, nav_width, info_open, info_width) = {
+            let session = &self.state.borrow().session;
+            (
+                session.nav_open,
+                session.nav_width,
+                session.info_open,
+                session.info_width,
+            )
+        };
+        if nav_open {
+            let paned = &self.widgets.main_paned;
+            let want = nav_width
+                .clamp(
+                    session::NAV_MIN_WIDTH + session::ACTIVITY_WIDTH,
+                    session::NAV_MAX_WIDTH,
+                )
+                .clamp(paned.min_position(), paned.max_position().max(paned.min_position()));
+            if paned.position() != want {
+                self.place_paned(paned, want);
+            }
+        }
+        if info_open {
+            let paned = &self.widgets.right_paned;
+            let total = paned.width();
+            if total > 200 {
+                let want = (total - info_width.clamp(session::INFO_MIN_WIDTH, session::INFO_MAX_WIDTH))
+                    .clamp(paned.min_position(), paned.max_position().max(paned.min_position()));
+                if paned.position() != want {
+                    self.place_paned(paned, want);
+                }
+            }
+        }
+        // Следующий сдвиг при этой ширине — уже рукой пользователя.
+        let main_total = self.widgets.main_paned.width();
+        let right_total = self.widgets.right_paned.width();
+        let mut state = self.state.borrow_mut();
+        state.main_total = main_total;
+        state.right_total = right_total;
     }
 
     fn place_paned(&self, paned: &gtk4::Paned, position: i32) {
