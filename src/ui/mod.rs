@@ -4121,13 +4121,33 @@ impl Ctx {
     }
 
     fn pick_wiki(&self, name: &str) {
+        // Раздел ссылки: [[Заметка#Раздел]], [[Заметка#^блок]], [[#Раздел]].
+        let parts = markdown::wiki_parts(name);
+        let fragment = parts.as_ref().and_then(|parts| parts.fragment).map(str::to_string);
+        let line_in = |path: &Path| -> Option<u32> {
+            let fragment = fragment.as_deref()?;
+            let text = self
+                .buffer_text(path)
+                .or_else(|| std::fs::read_to_string(path).ok())?;
+            markdown::fragment_line(&text, fragment).map(|line| line as u32)
+        };
+        if parts.as_ref().is_some_and(|parts| parts.target.is_empty()) {
+            let Some(path) = self.focused_path() else {
+                return;
+            };
+            match line_in(&path) {
+                Some(line) => self.go(path, Some(line)),
+                None => self.set_status(&format!("Раздел «{name}» в этом файле не найден")),
+            }
+            return;
+        }
         let Some(pin) = self.pin_path() else {
             return;
         };
         let files = self.state.borrow().index.files.clone();
         let matches = markdown::resolve_wiki(name, &pin, &files);
         match matches.as_slice() {
-            [only] => self.go(only.clone(), None),
+            [only] => self.go(only.clone(), line_in(only)),
             [] => self.set_status(&format!("Файл «{name}» не найден в пространстве")),
             many => self.show_pick(name, many),
         }

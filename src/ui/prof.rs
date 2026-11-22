@@ -251,6 +251,8 @@ enum Step {
     ExternalDelete,
     /// Ctrl+P: время открытия окна и число строк в списке через секунду.
     QuickOpen,
+    /// Переход по вики-ссылке: файл и строка курсора после него.
+    WikiJump(String),
     Quit,
 }
 
@@ -349,6 +351,11 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[1].clone(), 0));
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
+        }
+    }
+    if let Ok(list) = std::env::var("VERST_BENCH_WIKI") {
+        for name in list.split(';').filter(|n| !n.is_empty()) {
+            steps.push(Step::WikiJump(name.to_string()));
         }
     }
     if std::env::var_os("VERST_BENCH_QUICK").is_some() {
@@ -806,6 +813,18 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     );
                     run_steps(ctx, steps);
                 });
+            });
+        }
+        Step::WikiJump(name) => {
+            ctx.pick_wiki(&name);
+            glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                let file = ctx
+                    .focused_path()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+                let buffer = ctx.focused_view().buffer();
+                let line = buffer.iter_at_mark(&buffer.get_insert()).line();
+                eprintln!("PROF wiki [[{name}]] -> {file:?}, строка {}", line + 1);
+                run_steps(ctx, steps);
             });
         }
         Step::QuickOpen => {
