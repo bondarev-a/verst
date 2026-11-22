@@ -1825,7 +1825,10 @@ pub(super) fn read_text(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Файл не в UTF-8".to_string())
 }
 
-/// Запись в тот же inode. Подмена файла через rename даёт новую дату создания.
+/// Запись в тот же inode. Подмена файла через rename даёт новую дату создания,
+/// а по ней группируются заметки. Чтобы нехватка места или квота не обрезали
+/// файл посередине, место под новый текст резервируется до перезаписи: если
+/// его нет, файл остаётся прежним.
 pub(super) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let bytes = text.as_bytes();
     let mut file = if path.exists() {
@@ -1833,9 +1836,37 @@ pub(super) fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     } else {
         OpenOptions::new().write(true).create_new(true).open(path)?
     };
+    let old_len = file.metadata()?.len();
+    if bytes.len() as u64 > old_len {
+        reserve_space(&file, bytes.len() as u64)?;
+    }
     file.write_all(bytes)?;
     file.set_len(bytes.len() as u64)?;
     file.sync_all()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" {
+    fn posix_fallocate(fd: i32, offset: i64, len: i64) -> i32;
+}
+
+/// Выделить файлу место до `len` байт, не трогая содержимое.
+fn reserve_space(file: &fs::File, len: u64) -> std::io::Result<()> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        use std::os::fd::AsRawFd;
+        const EINVAL: i32 = 22;
+        const EOPNOTSUPP: i32 = 95;
+        let len = i64::try_from(len).map_err(std::io::Error::other)?;
+        // SAFETY: дескриптор открыт на запись и живёт дольше вызова.
+        let code = unsafe { posix_fallocate(file.as_raw_fd(), 0, len) };
+        // Файловая система без поддержки — пишем как раньше.
+        if code != 0 && code != EINVAL && code != EOPNOTSUPP {
+            return Err(std::io::Error::from_raw_os_error(code));
+        }
+    }
+    let _ = (file, len);
+    Ok(())
 }
 
 pub(super) fn buffer_text_of(buffer: &sourceview5::Buffer) -> String {
@@ -2184,6 +2215,24 @@ mod tests {
         write_atomic(&fresh, "новый").unwrap();
         assert_eq!(fs::read_to_string(&fresh).unwrap(), "новый");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Запуск: каталог на маленьком tmpfs в VERST_FULL_DISK_DIR.
+    #[test]
+    fn full_disk_keeps_old_text() {
+        let Some(dir) = std::env::var_os("VERST_FULL_DISK_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let path = dir.join("note.md");
+        fs::write(&path, "старый текст").unwrap();
+        let filler = dir.join("filler");
+        let mut fill = fs::File::create(&filler).unwrap();
+        while fill.write_all(&[b'x'; 4096]).is_ok() {}
+        let big = "новый текст ".repeat(20_000);
+        assert!(write_atomic(&path, &big).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "старый текст");
+        let _ = fs::remove_file(&filler);
     }
 
     #[test]

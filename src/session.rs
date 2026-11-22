@@ -257,18 +257,64 @@ impl Session {
         // Метаданные здесь не читаем. Ошибка stat до окна стирала открытые
         // файлы или держала старт, пока диск не ответит. Пропавшие пути
         // снимает отдельный проход уже после показа окна.
-        Self::from_json(&text).unwrap_or_default()
+        match Self::from_json(&text) {
+            Some(session) => session,
+            None => {
+                // Битый файл не затираем первым же сохранением: откладываем
+                // рядом, чтобы его можно было посмотреть или вернуть.
+                if !text.trim().is_empty() {
+                    let _ = fs::rename(&path, path.with_extension("json.bad"));
+                }
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string());
+        // JSON не умеет пути не в UTF-8 (например, имена из Windows-архива).
+        // Раньше ошибка превращалась в "{}" и стирала всю сессию.
+        let text = match serde_json::to_string_pretty(self) {
+            Ok(text) => text,
+            Err(_) => serde_json::to_string_pretty(&self.without_foreign_paths())
+                .map_err(std::io::Error::other)?,
+        };
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, text)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         fs::rename(tmp, path)
+    }
+
+    /// Копия без путей, которые нельзя записать в JSON.
+    fn without_foreign_paths(&self) -> Self {
+        let ok = |path: &PathBuf| path.to_str().is_some();
+        let mut copy = self.clone();
+        let active = self.active_pin.and_then(|i| self.pins.get(i)).cloned();
+        copy.pins.retain(ok);
+        copy.active_pin = active.and_then(|pin| copy.pins.iter().position(|p| *p == pin));
+        copy.open_files.retain(ok);
+        for pane in &mut copy.pane_paths {
+            if pane.as_ref().is_some_and(|path| !ok(path)) {
+                *pane = None;
+            }
+        }
+        copy.pinned_files.retain(ok);
+        copy.recent_files.retain(ok);
+        copy.carets.retain(|place| ok(&place.path));
+        copy.file_modes.retain(|mode| ok(&mode.path));
+        copy
     }
 
     pub fn from_json(text: &str) -> Option<Self> {
@@ -514,6 +560,26 @@ pub fn config_dir() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn foreign_paths_do_not_wipe_session() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xcf\xf0\xe8.md"));
+        let mut session = Session::default();
+        session.pins = vec![bad.clone(), PathBuf::from("/notes")];
+        session.active_pin = Some(1);
+        session.open_files = vec![PathBuf::from("/a.md"), bad.clone()];
+        session.recent_files = vec![bad.clone(), PathBuf::from("/b.md")];
+        assert!(serde_json::to_string(&session).is_err());
+        let clean = session.without_foreign_paths();
+        let text = serde_json::to_string(&clean).unwrap();
+        let back = Session::from_json(&text).unwrap();
+        assert_eq!(back.pins, vec![PathBuf::from("/notes")]);
+        assert_eq!(back.active_pin, Some(0));
+        assert_eq!(back.open_files, vec![PathBuf::from("/a.md")]);
+        assert_eq!(back.recent_files, vec![PathBuf::from("/b.md")]);
+    }
+
     use super::*;
 
     #[test]
