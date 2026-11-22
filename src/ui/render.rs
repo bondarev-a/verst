@@ -303,6 +303,17 @@ impl Ctx {
         }
     }
 
+    /// Для замеров: сколько таблиц сейчас показано виджетами (якорь жив).
+    pub(super) fn live_table_count(&self) -> usize {
+        self.state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .filter(|t| !t.anchor.is_deleted())
+            .count()
+    }
+
     /// Для замеров: какие теги стоят на первых служебных `##` вне строки курсора.
     pub(super) fn markup_report(&self) -> String {
         let Some(path) = self.focused_path() else {

@@ -438,7 +438,8 @@ impl Ctx {
     }
 
     pub(super) fn schedule_autosave(&self, path: PathBuf) {
-        if self.state.borrow().conflict_open {
+        // Пока пользователь решает, чья версия файла верна, не пишем его.
+        if self.state.borrow().conflict.as_ref() == Some(&path) {
             return;
         }
         if let Some(id) = self.state.borrow_mut().autosave.remove(&path) {
@@ -467,6 +468,9 @@ impl Ctx {
             .get(path)
             .is_some_and(|entry| entry.dirty);
         if from_autosave && !dirty {
+            return true;
+        }
+        if from_autosave && self.state.borrow().conflict.as_deref() == Some(path) {
             return true;
         }
         match write_atomic(path, &text) {
@@ -518,7 +522,11 @@ impl Ctx {
 
     pub(super) fn on_disk_changed(&self, path: &Path) {
     let _prof = crate::ui::prof::span("on_disk_changed");
-        if self.state.borrow().conflict_open {
+        if self.state.borrow().conflict.is_some() {
+            let mut state = self.state.borrow_mut();
+            if !state.conflict_queue.iter().any(|queued| queued == path) {
+                state.conflict_queue.push(path.to_path_buf());
+            }
             return;
         }
         let Ok(disk) = read_text(path) else {
@@ -538,7 +546,18 @@ impl Ctx {
         if disk == buffer_text || disk == last_saved || acked.as_ref() == Some(&disk) {
             return;
         }
-        self.state.borrow_mut().conflict_open = true;
+        // Своих правок в буфере нет — просто показываем версию с диска.
+        if buffer_text == last_saved {
+            self.reload(path, &disk);
+            return;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.conflict = Some(path.to_path_buf());
+            if let Some(id) = state.autosave.remove(path) {
+                id.remove();
+            }
+        }
         let dialog = gtk4::AlertDialog::builder()
             .modal(true)
             .message("Файл изменён на диске")
@@ -552,11 +571,19 @@ impl Ctx {
         let disk_copy = disk.clone();
         let window = self.widgets.window.clone();
         dialog.choose(Some(&window), None::<&gio::Cancellable>, move |result| {
-            ctx.state.borrow_mut().conflict_open = false;
+            ctx.state.borrow_mut().conflict = None;
             if result == Ok(1) {
                 ctx.reload(&watch, &disk_copy);
-            } else if let Some(entry) = ctx.state.borrow_mut().buffers.get_mut(&watch) {
-                entry.acked_external = Some(disk_copy);
+            } else {
+                if let Some(entry) = ctx.state.borrow_mut().buffers.get_mut(&watch) {
+                    entry.acked_external = Some(disk_copy);
+                }
+                // Правки, сделанные пока был открыт диалог, ещё не записаны.
+                ctx.schedule_autosave(watch.clone());
+            }
+            let queued = std::mem::take(&mut ctx.state.borrow_mut().conflict_queue);
+            for path in queued {
+                ctx.on_disk_changed(&path);
             }
         });
     }
@@ -571,6 +598,8 @@ impl Ctx {
         else {
             return;
         };
+        // Таблицы и картинки держатся на якорях в тексте; set_text их удаляет.
+        self.drop_render_for_path(path);
         self.state.borrow_mut().loading = true;
         buffer.set_text(text);
         self.state.borrow_mut().loading = false;

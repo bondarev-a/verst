@@ -217,7 +217,10 @@ pub(super) struct State {
     right_total: i32,
     /// Возврат панелей к сохранённой ширине уже запланирован.
     dock_restore: bool,
-    conflict_open: bool,
+    /// Файл, по которому сейчас открыт диалог «изменён на диске».
+    conflict: Option<PathBuf>,
+    /// Файлы, изменённые на диске, пока диалог был открыт.
+    conflict_queue: Vec<PathBuf>,
     autosave: HashMap<PathBuf, glib::SourceId>,
     session_save: Option<glib::SourceId>,
     gutter_installed: [bool; 2],
@@ -1121,7 +1124,8 @@ impl Ctx {
                 main_total: 0,
                 right_total: 0,
                 dock_restore: false,
-                conflict_open: false,
+                conflict: None,
+                conflict_queue: Vec::new(),
                 autosave: HashMap::new(),
                 session_save: None,
                 gutter_installed: [false, false],

@@ -218,6 +218,9 @@ enum Step {
     Caret(usize, usize),
     /// Вставить метку в текст и сразу закрыть окно, как Ctrl+Q.
     TypeAndClose,
+    /// Изменить открытый файл на диске другой программой; `true` — в буфере
+    /// перед этим есть несохранённая правка.
+    ExternalWrite(bool),
     Quit,
 }
 
@@ -293,6 +296,11 @@ fn start_bench(ctx: Ctx) {
     if let Some(file) = std::env::var_os("VERST_BENCH_TYPE_CLOSE") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
         steps.push(Step::TypeAndClose);
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_EXTERNAL") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::ExternalWrite(false));
+        steps.push(Step::ExternalWrite(true));
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -606,6 +614,39 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 let (tables, second, mapped) = ctx.table_grid_report();
                 eprintln!("PROF {label}: tables {tables}, pane2 grids {second}, mapped {mapped}");
                 save_shot(&ctx, &label);
+                run_steps(ctx, steps);
+            });
+        }
+        Step::ExternalWrite(edited) => {
+            let Some(path) = ctx.focused_path() else {
+                run_steps(ctx, steps);
+                return;
+            };
+            if edited {
+                ctx.focused_view().buffer().insert_at_cursor("МОЯ_ПРАВКА ");
+            }
+            let tables_before = ctx.live_table_count();
+            let mut disk = std::fs::read_to_string(&path).unwrap_or_default();
+            disk.push_str("\nВНЕШНЯЯ_ПРАВКА\n");
+            std::fs::write(&path, &disk).unwrap();
+            glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+                let text = ctx.buffer_text(&path).unwrap_or_default();
+                let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+                let (dialog, dirty) = {
+                    let state = ctx.state.borrow();
+                    (
+                        state.conflict.is_some(),
+                        state.buffers.get(&path).is_some_and(|e| e.dirty),
+                    )
+                };
+                eprintln!(
+                    "PROF external edited={edited}: dialog {dialog}, dirty {dirty}, buffer_has_external {}, disk_has_external {}, disk_has_mine {}, tables {} -> {}",
+                    text.contains("ВНЕШНЯЯ_ПРАВКА"),
+                    on_disk.contains("ВНЕШНЯЯ_ПРАВКА"),
+                    on_disk.contains("МОЯ_ПРАВКА"),
+                    tables_before,
+                    ctx.live_table_count()
+                );
                 run_steps(ctx, steps);
             });
         }
