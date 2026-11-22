@@ -215,6 +215,7 @@ enum Step {
     Action(String),
     Resize(i32),
     Drag(i32, i32),
+    Caret(usize, usize),
     Quit,
 }
 
@@ -273,6 +274,12 @@ fn start_bench(ctx: Ctx) {
         if paths.len() == 2 {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::TableLeave(paths[1].clone()));
+        }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_CARET") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        for (row, col) in [(0, 0), (1, 0), (1, 1), (2, 3)] {
+            steps.push(Step::Caret(row, col));
         }
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL") {
@@ -374,6 +381,14 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             take_totals();
             reset_stall();
             scroll_stress(ctx, steps, 0, 0);
+        }
+        Step::Caret(row, col) => {
+            ctx.bench_caret_in_cell(0, row, col);
+            glib::timeout_add_local_once(Duration::from_millis(700), move || {
+                eprintln!("PROF caret {}", ctx.bench_caret_report());
+                save_shot(&ctx, &format!("caret-{row}-{col}"));
+                glib::timeout_add_local_once(Duration::from_millis(500), move || run_steps(ctx, steps));
+            });
         }
         Step::Drag(nav, info) => {
             // Как перетаскивание разделителя мышью: без dock_adjust.
