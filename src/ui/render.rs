@@ -771,6 +771,7 @@ impl Ctx {
         buffer.insert(&mut start, &value);
         buffer.end_user_action();
         self.state.borrow_mut().render.writing = false;
+        self.note_text_edit(&path, false);
         // Синхронизировать текст ячеек во втором поле.
         self.sync_table_cell_entries(table, row, col, value.trim());
     }
@@ -879,6 +880,7 @@ impl Ctx {
         };
         self.state.borrow_mut().render.pending_table_focus = Some(focus);
         self.replace_all_text(&buffer, &next);
+        self.note_text_edit(path, false);
         self.refresh_render_now();
     }
 

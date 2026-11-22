@@ -3044,6 +3044,12 @@ impl Ctx {
     }
 
     fn schedule_preview(&self) {
+        self.schedule_side_and_preview();
+        self.schedule_render();
+    }
+
+    /// Предпросмотр и боковые панели после правки, без перерисовки документа.
+    fn schedule_side_and_preview(&self) {
         let tick = {
             let mut state = self.state.borrow_mut();
             state.preview_tick = state.preview_tick.wrapping_add(1);
@@ -3074,7 +3080,6 @@ impl Ctx {
             ctx.refresh_file_facts();
             ctx.refresh_side_panels();
         });
-        self.schedule_render();
     }
 
     fn save_pdf(&self) {

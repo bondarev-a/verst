@@ -195,22 +195,7 @@ impl Ctx {
                 return;
             }
             let watch = watch_id.borrow().clone();
-            let became_dirty =
-                ctx.state
-                    .borrow_mut()
-                    .buffers
-                    .get_mut(&watch)
-                    .is_some_and(|entry| {
-                        let was = entry.dirty;
-                        entry.dirty = true;
-                        entry.acked_external = None;
-                        !was
-                    });
-            ctx.schedule_autosave(watch);
-            if became_dirty {
-                ctx.refresh_open_list();
-            }
-            ctx.schedule_preview();
+            ctx.note_text_edit(&watch, true);
         });
         let ctx = self.clone();
         buffer.connect_mark_set(move |_, _, mark| {
@@ -412,6 +397,33 @@ impl Ctx {
         self.follow_focus();
         self.save_session();
         self.set_status(&format!("Сохранено как {}", dest.display()));
+    }
+
+    /// Текст файла изменён: правкой пользователя или правкой таблицы.
+    /// Правки таблиц идут под флагом `render.writing`, и обработчик
+    /// `changed` их пропускает, поэтому они вызывают это напрямую.
+    /// `rerender = false` — не перерисовывать документ (активна ячейка).
+    pub(super) fn note_text_edit(&self, path: &Path, rerender: bool) {
+        let became_dirty = self
+            .state
+            .borrow_mut()
+            .buffers
+            .get_mut(path)
+            .is_some_and(|entry| {
+                let was = entry.dirty;
+                entry.dirty = true;
+                entry.acked_external = None;
+                !was
+            });
+        self.schedule_autosave(path.to_path_buf());
+        if became_dirty {
+            self.refresh_open_list();
+        }
+        if rerender {
+            self.schedule_preview();
+        } else {
+            self.schedule_side_and_preview();
+        }
     }
 
     pub(super) fn schedule_autosave(&self, path: PathBuf) {

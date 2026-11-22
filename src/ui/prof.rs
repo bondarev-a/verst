@@ -511,11 +511,16 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 let editable = ctx.focused_view().is_editable();
                 let here = ctx.focused_path().and_then(|p| ctx.buffer_text(&p)).unwrap_or_default();
                 let there = from.as_ref().and_then(|p| ctx.buffer_text(p)).unwrap_or_default();
+                let disk = from
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default();
                 eprintln!(
-                    "PROF table_leave: typed {typed}, cell_active_after {}, editable {editable}, mark_in_old {}, mark_in_new {}",
+                    "PROF table_leave: typed {typed}, cell_active_after {}, editable {editable}, mark_in_old {}, mark_in_new {}, mark_on_disk {}",
                     ctx.any_table_cell_focused(),
                     there.contains("МЕТКА_ЯЧЕЙКИ"),
-                    here.contains("МЕТКА_ЯЧЕЙКИ")
+                    here.contains("МЕТКА_ЯЧЕЙКИ"),
+                    disk.contains("МЕТКА_ЯЧЕЙКИ")
                 );
                 run_steps(ctx, steps);
             });
