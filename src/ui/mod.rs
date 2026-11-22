@@ -4273,7 +4273,9 @@ impl Ctx {
             self.set_status("Быстрый переход работает внутри запиненного пространства");
             return;
         };
-        let files = index::list_text_files(&pin);
+        // Обход каталога — в фоне: на большом пространстве (до 20 000 файлов)
+        // он держал окно, пока не закончится. Список заполняется, когда готов.
+        let files: Rc<RefCell<Option<Vec<PathBuf>>>> = Rc::new(RefCell::new(None));
         let dialog = gtk4::Window::builder()
             .transient_for(&self.widgets.window)
             .modal(true)
@@ -4293,9 +4295,14 @@ impl Ctx {
             let entry = entry.clone();
             move || {
                 clear_list(&list);
+                let files = files.borrow();
+                let Some(files) = files.as_ref() else {
+                    list.append(&dim_row("Читаю список файлов…"));
+                    return;
+                };
                 let query = entry.text().to_lowercase();
                 let mut next = Vec::new();
-                for path in &files {
+                for path in files {
                     let text = path.display().to_string().to_lowercase();
                     let name = path
                         .file_name()
@@ -4323,6 +4330,14 @@ impl Ctx {
         refill();
         let refill_changed = refill.clone();
         entry.connect_search_changed(move |_| refill_changed());
+        let walk = gio::spawn_blocking(move || index::list_text_files(&pin));
+        let refill_ready = refill.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(found) = walk.await {
+                *files.borrow_mut() = Some(found);
+                refill_ready();
+            }
+        });
         let ctx = self.clone();
         let shown_activate = shown.clone();
         let dialog_activate = dialog.clone();

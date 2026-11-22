@@ -249,6 +249,8 @@ enum Step {
     /// Удалить открытый файл другой программой, набрать текст и подождать
     /// автосохранение: файл не должен появиться снова.
     ExternalDelete,
+    /// Ctrl+P: время открытия окна и число строк в списке через секунду.
+    QuickOpen,
     Quit,
 }
 
@@ -348,6 +350,9 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
         }
+    }
+    if std::env::var_os("VERST_BENCH_QUICK").is_some() {
+        steps.push(Step::QuickOpen);
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_EXT_DELETE") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -801,6 +806,38 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     );
                     run_steps(ctx, steps);
                 });
+            });
+        }
+        Step::QuickOpen => {
+            let t0 = Instant::now();
+            ctx.quick_open();
+            let opened = t0.elapsed();
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                let mut rows = 0;
+                for window in gtk4::Window::list_toplevels() {
+                    let Ok(window) = window.downcast::<gtk4::Window>() else { continue };
+                    if window.title().as_deref() != Some("Перейти к файлу") {
+                        continue;
+                    }
+                    let mut stack = vec![window.clone().upcast::<gtk4::Widget>()];
+                    while let Some(widget) = stack.pop() {
+                        if let Ok(list) = widget.clone().downcast::<gtk4::ListBox>() {
+                            let mut i = 0;
+                            while list.row_at_index(i).is_some() {
+                                i += 1;
+                            }
+                            rows = i;
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(c) = child {
+                            child = c.next_sibling();
+                            stack.push(c);
+                        }
+                    }
+                    window.close();
+                }
+                eprintln!("PROF quick_open: окно за {:.1} ms, строк {rows}", ms(opened));
+                run_steps(ctx, steps);
             });
         }
         Step::ExternalDelete => {
