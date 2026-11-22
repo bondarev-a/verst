@@ -267,6 +267,8 @@ pub(super) struct State {
     /// Адрес, который предпросмотр грузит сам (без фрагмента). Остальные
     /// переходы без клика — из содержимого страницы — запрещены.
     preview_expect: Option<String>,
+    /// JavaScript, разрешённый текущей странице предпросмотра (только PDF).
+    preview_js: bool,
     side_tick: u64,
     /// Растёт, когда меняется то, от чего зависят ссылки: индекс, граф
     /// чужого пина, активный пин. Кеши ссылок с другим значением устарели.
@@ -1180,6 +1182,7 @@ impl Ctx {
                 notes_collapsed: Default::default(),
                 side_shown: Default::default(),
                 preview_expect: None,
+                preview_js: false,
                 side_tick: 0,
                 links_gen: 0,
             })),
@@ -1913,8 +1916,9 @@ impl Ctx {
 
         let state = self.state.clone();
         self.widgets.graph.set_draw_func(move |area, cr, _, _| {
-            let layout = state.borrow().graph.clone();
-            paint_graph(area, cr, &layout);
+            // Без копии всего графа на каждый кадр отрисовки.
+            let state = state.borrow();
+            paint_graph(area, cr, &state.graph);
         });
         let ctx = self.clone();
         self.widgets
@@ -2809,8 +2813,11 @@ impl Ctx {
         let tick = self.state.borrow().mode_tick;
         let ctx = self.clone();
         let mut attempts = 0;
+        // Переход в другой файл, пока ждём раскладку, отменяет прокрутку:
+        // раньше она догоняла и прокручивала уже другой файл.
+        let file = self.focused_path();
         glib::timeout_add_local(Duration::from_millis(50), move || {
-            if ctx.state.borrow().mode_tick != tick {
+            if ctx.state.borrow().mode_tick != tick || ctx.focused_path() != file {
                 return glib::ControlFlow::Break;
             }
             attempts += 1;
@@ -2853,6 +2860,7 @@ impl Ctx {
 
     fn scroll_preview_to_line(&self, line: u32, attempt: u8) {
         let ctx = self.clone();
+        let file = self.focused_path();
         let script = format!(
             r#"(function(){{
   var nodes = document.querySelectorAll('[id^="twl"]');
@@ -2881,7 +2889,9 @@ impl Ctx {
                 return;
             }
             glib::timeout_add_local_once(Duration::from_millis(50), move || {
-                ctx.scroll_preview_to_line(line, attempt + 1);
+                if ctx.focused_path() == file {
+                    ctx.scroll_preview_to_line(line, attempt + 1);
+                }
             });
         });
     }
@@ -2892,12 +2902,14 @@ impl Ctx {
         done: impl FnOnce(Option<webkit6::javascriptcore::Value>) + 'static,
     ) {
         let preview = self.widgets.preview.clone();
-        let was_on = WebViewExt::settings(&preview)
-            .map(|settings| settings.enables_javascript())
-            .unwrap_or(false);
         if let Some(settings) = WebViewExt::settings(&preview) {
             settings.set_enable_javascript(true);
         }
+        // После вызова JS возвращается в то состояние, которое задала
+        // страница (arm_preview), а не в запомненное перед вызовом: два
+        // перекрывающихся вызова иначе оставляли JS включённым для чужой
+        // заметки до следующей загрузки.
+        let state = self.state.clone();
         preview.clone().evaluate_javascript(
             script,
             None,
@@ -2905,7 +2917,7 @@ impl Ctx {
             None::<&gio::Cancellable>,
             move |result| {
                 if let Some(settings) = WebViewExt::settings(&preview) {
-                    settings.set_enable_javascript(was_on);
+                    settings.set_enable_javascript(state.borrow().preview_js);
                 }
                 done(result.ok());
             },
@@ -3436,6 +3448,7 @@ impl Ctx {
         let Some(settings) = WebViewExt::settings(&self.widgets.preview) else {
             return;
         };
+        self.state.borrow_mut().preview_js = javascript;
         settings.set_enable_javascript(javascript);
         settings.set_enable_javascript_markup(javascript);
     }
