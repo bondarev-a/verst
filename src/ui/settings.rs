@@ -52,9 +52,22 @@ impl Ctx {
         open_spin.set_tooltip_text(Some(
             "Сколько файлов держать в списке «Открытые». Лишние закрываются, начиная с давно не открывавшихся. Файл, который сейчас на экране, остаётся.",
         ));
+        // Лимит применяется после паузы: раньше каждый шаг стрелки или
+        // промежуточное значение при наборе («5» на пути к «50») сразу
+        // закрывали лишние файлы, и вернуть их было нельзя.
         let ctx = self.clone();
+        let pending: std::rc::Rc<std::cell::Cell<u64>> = Default::default();
         open_spin.connect_value_changed(move |spin| {
-            ctx.set_open_limit(spin.value() as u32);
+            let tick = pending.get().wrapping_add(1);
+            pending.set(tick);
+            let value = spin.value() as u32;
+            let ctx = ctx.clone();
+            let pending = pending.clone();
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+                if pending.get() == tick {
+                    ctx.set_open_limit(value);
+                }
+            });
         });
         box_.append(&labeled("Открытых файлов", &open_spin));
 

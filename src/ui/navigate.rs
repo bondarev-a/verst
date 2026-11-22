@@ -666,5 +666,17 @@ fn scroll_view_later(view: &sourceview5::View, line: i32, column: u32) {
         queue(view.clone());
         return;
     }
-    view.connect_realize(move |view| queue(view.clone()));
+    // Обработчик одноразовый: раньше каждый вызов для ещё не показанного
+    // поля добавлял новый и навсегда, и при каждом следующем показе поле
+    // прокручивалось столько раз, сколько их накопилось.
+    let handler: std::rc::Rc<std::cell::Cell<Option<gtk4::glib::SignalHandlerId>>> =
+        Default::default();
+    let once = handler.clone();
+    let id = view.connect_realize(move |view| {
+        if let Some(id) = once.take() {
+            view.disconnect(id);
+        }
+        queue(view.clone());
+    });
+    handler.set(Some(id));
 }
