@@ -208,6 +208,8 @@ impl Ctx {
             let watch = watch_id.borrow().clone();
             ctx.note_text_edit(&watch, true);
         });
+        guard_undo_steps(self, &buffer, true);
+        guard_undo_steps(self, &buffer, false);
         let ctx = self.clone();
         buffer.connect_mark_set(move |_, _, mark| {
             let name = mark.name().map(|name| name.to_string()).unwrap_or_default();
@@ -612,6 +614,67 @@ impl Ctx {
         self.follow_focus();
         self.set_status("Файл перечитан с диска");
     }
+}
+
+/// Отмена и повтор в отрисованном Markdown.
+///
+/// - Пока GTK применяет шаг, курсор не трогает таблицы. Иначе курсор,
+///   попавший в таблицу, включал ячейку, а при активной ячейке вставка в
+///   текст глушится — вторая половина шага (возврат старого текста) терялась.
+/// - Шаг, не изменивший текст файла (только якоря таблиц, U+FFFC),
+///   пропускается: делаем следующий.
+fn guard_undo_steps(ctx: &Ctx, buffer: &sourceview5::Buffer, undo: bool) {
+    let ctx_before = ctx.clone();
+    let ctx_after = ctx.clone();
+    let signal = if undo { "undo" } else { "redo" };
+    let before: Rc<RefCell<Option<String>>> = Rc::default();
+    let busy = Rc::new(std::cell::Cell::new(false));
+    let snap = before.clone();
+    let guard = busy.clone();
+    buffer.connect_closure(
+        signal,
+        false,
+        glib::closure_local!(move |b: gtk4::TextBuffer| {
+            if guard.get() {
+                return;
+            }
+            ctx_before.suspend_cursor_paint(true);
+            if let Some(b) = b.downcast_ref::<sourceview5::Buffer>() {
+                *snap.borrow_mut() = Some(buffer_text_of(b));
+            }
+        }),
+    );
+    buffer.connect_closure(
+        signal,
+        true,
+        glib::closure_local!(move |b: gtk4::TextBuffer| {
+            if busy.get() {
+                return;
+            }
+            let Some(start) = before.borrow_mut().take() else {
+                return;
+            };
+            let Some(b) = b.downcast_ref::<sourceview5::Buffer>() else {
+                ctx_after.suspend_cursor_paint(false);
+                return;
+            };
+            busy.set(true);
+            for _ in 0..64 {
+                if buffer_text_of(b) != start {
+                    break;
+                }
+                if undo && b.can_undo() {
+                    b.undo();
+                } else if !undo && b.can_redo() {
+                    b.redo();
+                } else {
+                    break;
+                }
+            }
+            busy.set(false);
+            ctx_after.suspend_cursor_paint(false);
+        }),
+    );
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {

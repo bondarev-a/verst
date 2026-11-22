@@ -95,7 +95,7 @@ struct LiveTable {
 struct LiveImage {
     path: PathBuf,
     anchor: gtk4::TextChildAnchor,
-    widgets: [gtk4::Widget; 2],
+    widgets: [Option<gtk4::Widget>; 2],
 }
 
 impl Ctx {
@@ -303,6 +303,11 @@ impl Ctx {
         }
     }
 
+    /// Для замеров: сколько сеток таблиц в первой панели.
+    pub(super) fn first_pane_grid_count(&self) -> usize {
+        self.state.borrow().render.tables.iter().filter(|t| t.grids[0].is_some()).count()
+    }
+
     /// Для замеров: сколько таблиц сейчас показано виджетами (якорь жив).
     pub(super) fn live_table_count(&self) -> usize {
         self.state
@@ -437,6 +442,7 @@ impl Ctx {
 
     /// Для замеров: таблиц, сеток второй панели, из них показанных.
     pub(super) fn table_grid_report(&self) -> (usize, usize, usize) {
+        // (таблиц, сеток во второй панели, из них показанных)
         let state = self.state.borrow();
         let tables = &state.render.tables;
         let second: Vec<_> = tables.iter().filter_map(|t| t.grids[1].clone()).collect();
@@ -523,7 +529,7 @@ impl Ctx {
             }
         }
         for image in images {
-            for widget in &image.widgets {
+            for widget in image.widgets.iter().flatten() {
                 detach_child(widget);
             }
         }
@@ -993,10 +999,22 @@ impl Ctx {
         }
     }
 
+    /// Заменить текст буфера на `next`, переписав только отличающийся кусок.
+    /// `set_text` стирал всю историю отмены, и Ctrl+Z после вставки строки
+    /// или колонки таблицы переставал работать.
     fn replace_all_text(&self, buffer: &sourceview5::Buffer, next: &str) {
+        let text = buffer_text_of(buffer);
+        let (from, old_to, new_to) = changed_span(&text, next);
+        if from == old_to && from == new_to {
+            return;
+        }
         self.state.borrow_mut().render.writing = true;
+        let map = TextMap::new(buffer, &text);
+        let mut start = map.iter(buffer, &text, from);
+        let mut end = map.iter(buffer, &text, old_to);
         buffer.begin_user_action();
-        buffer.set_text(next);
+        buffer.delete(&mut start, &mut end);
+        buffer.insert(&mut start, &next[from..new_to]);
         buffer.end_user_action();
         self.state.borrow_mut().render.writing = false;
     }
@@ -1015,8 +1033,8 @@ impl Ctx {
             view.set_editable(allow);
             view.set_cursor_visible(allow);
             view.set_can_focus(allow);
-            view.action_set_enabled("undo", !lock);
-            view.action_set_enabled("redo", !lock);
+            view.action_set_enabled("text.undo", !lock);
+            view.action_set_enabled("text.redo", !lock);
             gtk4::prelude::TextViewExt::reset_im_context(view);
         }
     }
@@ -1755,7 +1773,7 @@ impl Ctx {
                 && state.render.painted_path.as_deref() == Some(path)
                 && state.render.table_bodies == bodies
                 && state.render.image_keys == image_keys
-        };
+        } && self.embeds_match_panes(buffer);
         if same_widgets {
             let prev_line = self.state.borrow().render.cursor_line;
             {
@@ -1825,7 +1843,33 @@ impl Ctx {
                 std::mem::take(&mut state.render.images),
             )
         };
-        self.drop_embeds(&old_tables, &old_images);
+        // Якоря этого файла не удаляем, а отдаём новым таблицам и картинкам:
+        // удаление якоря попадает в историю отмены и требует её очистки.
+        let mut spare: Vec<gtk4::TextChildAnchor> = Vec::new();
+        let (reuse_tables, other_tables): (Vec<_>, Vec<_>) =
+            old_tables.iter().cloned().partition(|t| t.path == path);
+        let (reuse_images, other_images): (Vec<_>, Vec<_>) =
+            old_images.iter().cloned().partition(|i| i.path == path);
+        for table in &reuse_tables {
+            for grid in table.grids.iter().flatten() {
+                detach_child(grid);
+            }
+            if !table.anchor.is_deleted() {
+                spare.push(table.anchor.clone());
+            }
+        }
+        for image in &reuse_images {
+            for widget in image.widgets.iter().flatten() {
+                detach_child(widget);
+            }
+            if !image.anchor.is_deleted() {
+                spare.push(image.anchor.clone());
+            }
+        }
+        self.drop_embeds(&other_tables, &other_images);
+        clear_render_tags(buffer);
+        drop(reuse_tables);
+        drop(reuse_images);
         let freed = !old_tables.is_empty() || !old_images.is_empty();
         { let _p = crate::ui::prof::span("rw:free_old_widgets"); drop(old_tables); drop(old_images); }
         if freed {
@@ -1870,17 +1914,23 @@ impl Ctx {
                     let Some(table) = md_tables.get(index) else {
                         continue;
                     };
-                    if let Some(live) = self.mount_table(buffer, path, &text, &map, table, index) {
+                    let iter = map.iter(buffer, &text, table.start);
+                    let anchor = take_or_create_anchor(buffer, iter, &mut spare);
+                    if let Some(live) = self.mount_table(buffer, path, &text, anchor, table, index) {
                         live_tables.push(live);
                     }
                 }
                 Placement::Image { start, dest, .. } => {
-                    if let Some(image) = self.mount_image(buffer, path, &text, &map, start, &dest) {
+                    let iter = map.iter(buffer, &text, start);
+                    let anchor = take_or_create_anchor(buffer, iter, &mut spare);
+                    if let Some(image) = self.mount_image(buffer, path, anchor, &dest) {
                         live_images.push(image);
                     }
                 }
             }
         }
+        // Таблица или картинка исчезла из текста: её якорь больше не нужен.
+        remove_anchors(&buffer.clone().upcast::<gtk4::TextBuffer>(), spare);
         self.state.borrow_mut().render.writing = false;
         cover_embedded_source(buffer, &text, &md_tables, &spans, cursor_line);
         lift_embedded(buffer, &live_tables, &live_images);
@@ -1920,26 +1970,51 @@ impl Ctx {
         state.render.painted_path = Some(path.to_path_buf());
     }
 
+    /// Виджеты таблиц и картинок стоят ровно в тех полях, что показывают
+    /// этот буфер. Иначе (во второй панели открыли тот же файл, или в ней
+    /// теперь другой) их надо пересобрать.
+    fn embeds_match_panes(&self, buffer: &sourceview5::Buffer) -> bool {
+        let split = self.state.borrow().session.split;
+        let wanted = [self.pane_shows(0, buffer), split && self.pane_shows(1, buffer)];
+        let images_wanted = [self.pane_shows(0, buffer), self.pane_shows(1, buffer)];
+        let state = self.state.borrow();
+        state
+            .render
+            .tables
+            .iter()
+            .all(|t| (0..2).all(|p| t.grids[p].is_some() == wanted[p]))
+            && state
+                .render
+                .images
+                .iter()
+                .all(|i| (0..2).all(|p| i.widgets[p].is_some() == images_wanted[p]))
+    }
+
+    /// Поле `pane` показывает этот буфер. Якорь чужого буфера в поле
+    /// с другим файлом — то же падение GTK, что и раньше.
+    fn pane_shows(&self, pane: usize, buffer: &sourceview5::Buffer) -> bool {
+        self.widgets.views[pane].buffer() == *buffer.upcast_ref::<gtk4::TextBuffer>()
+    }
+
     fn mount_table(
         &self,
         buffer: &sourceview5::Buffer,
         path: &Path,
         text: &str,
-        map: &TextMap,
+        anchor: gtk4::TextChildAnchor,
         table: &MdTable,
         index: usize,
     ) -> Option<LiveTable> {
     let _prof = crate::ui::prof::span("mount_table");
-        let mut iter = map.iter(buffer, text, table.start);
-        let anchor = buffer.create_child_anchor(&mut iter);
         lift_anchor_scale(buffer, &anchor);
         let focus_cell = Rc::new(RefCell::new(None));
         // Скрытой второй панели сетка не нужна: каждая ячейка — это Entry,
         // Overlay и три контроллера, а вторая копия удваивала их число.
         let split = self.state.borrow().session.split;
+        let wanted = [self.pane_shows(0, buffer), split && self.pane_shows(1, buffer)];
         let grids = [
-            Some(build_table_grid(self, path, table, index, focus_cell.clone())),
-            split.then(|| build_table_grid(self, path, table, index, focus_cell.clone())),
+            wanted[0].then(|| build_table_grid(self, path, table, index, focus_cell.clone())),
+            wanted[1].then(|| build_table_grid(self, path, table, index, focus_cell.clone())),
         ];
         for (pane, grid) in grids.iter().enumerate() {
             let Some(grid) = grid else {
@@ -1970,24 +2045,24 @@ impl Ctx {
         &self,
         buffer: &sourceview5::Buffer,
         path: &Path,
-        text: &str,
-        map: &TextMap,
-        start: usize,
+        anchor: gtk4::TextChildAnchor,
         dest: &str,
     ) -> Option<LiveImage> {
     let _prof = crate::ui::prof::span("mount_image");
-        let mut iter = map.iter(buffer, text, start);
-        let anchor = buffer.create_child_anchor(&mut iter);
         lift_anchor_scale(buffer, &anchor);
         let file = resolve_image(path, dest);
-        let w0 = image_widget(file.as_deref());
-        let w1 = image_widget(file.as_deref());
-        self.widgets.views[0].add_child_at_anchor(&w0, &anchor);
-        self.widgets.views[1].add_child_at_anchor(&w1, &anchor);
+        let mut widgets = [None, None];
+        for (pane, slot) in widgets.iter_mut().enumerate() {
+            if self.pane_shows(pane, buffer) {
+                let widget = image_widget(file.as_deref());
+                self.widgets.views[pane].add_child_at_anchor(&widget, &anchor);
+                *slot = Some(widget);
+            }
+        }
         Some(LiveImage {
             path: path.to_path_buf(),
             anchor,
-            widgets: [w0, w1],
+            widgets,
         })
     }
 
@@ -2636,6 +2711,31 @@ fn raise_tag(table: &gtk4::TextTagTable, tag: &gtk4::TextTag) {
     }
 }
 
+/// Отличающийся кусок двух текстов: `old[from..old_to]` заменяется на
+/// `new[from..new_to]`. Границы — по символам.
+fn changed_span(old: &str, new: &str) -> (usize, usize, usize) {
+    let mut from = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(from) || !new.is_char_boundary(from) {
+        from -= 1;
+    }
+    let max_tail = (old.len() - from).min(new.len() - from);
+    let mut tail = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(max_tail)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(old.len() - tail) || !new.is_char_boundary(new.len() - tail) {
+        tail -= 1;
+    }
+    (from, old.len() - tail, new.len() - tail)
+}
+
 fn iter_at_file_byte(buffer: &sourceview5::Buffer, text: &str, byte: usize) -> gtk4::TextIter {
     let _prof = crate::ui::prof::span("iter_at_file_byte");
     TextMap::new(buffer, text).iter(buffer, text, byte)
@@ -2696,6 +2796,48 @@ fn line_contains(line: Option<(usize, usize)>, byte: usize) -> bool {
     line.is_some_and(|(a, b)| byte >= a && byte < b)
 }
 
+/// Якорь, оставшийся от прошлой отрисовки прямо перед `iter` (карта текста
+/// ставит позицию после якорей), или новый.
+fn take_or_create_anchor(
+    buffer: &sourceview5::Buffer,
+    mut iter: gtk4::TextIter,
+    spare: &mut Vec<gtk4::TextChildAnchor>,
+) -> gtk4::TextChildAnchor {
+    let mut prev = iter;
+    if prev.backward_char() {
+        if let Some(found) = prev.child_anchor() {
+            if let Some(at) = spare.iter().position(|a| *a == found) {
+                return spare.swap_remove(at);
+            }
+        }
+    }
+    buffer.create_child_anchor(&mut iter)
+}
+
+/// Удалить якоря вне истории отмены (см. `remove_path_anchors`).
+fn remove_anchors(buffer: &gtk4::TextBuffer, anchors: Vec<gtk4::TextChildAnchor>) {
+    let mut positions: Vec<(i32, gtk4::TextChildAnchor)> = anchors
+        .into_iter()
+        .filter(|a| !a.is_deleted())
+        .map(|a| (buffer.iter_at_child_anchor(&a).offset(), a))
+        .collect();
+    if positions.is_empty() {
+        return;
+    }
+    positions.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
+    buffer.begin_irreversible_action();
+    for (_, anchor) in positions {
+        if anchor.is_deleted() {
+            continue;
+        }
+        let mut iter = buffer.iter_at_child_anchor(&anchor);
+        let mut end = iter;
+        end.forward_char();
+        buffer.delete(&mut iter, &mut end);
+    }
+    buffer.end_irreversible_action();
+}
+
 fn remove_path_anchors(
     buffer: &gtk4::TextBuffer,
     tables: &[LiveTable],
@@ -2721,6 +2863,15 @@ fn remove_path_anchors(
         }
     }
     positions.sort_by_key(|(offset, _)| std::cmp::Reverse(*offset));
+    if positions.is_empty() {
+        return;
+    }
+    // Вставку якоря GTK в историю отмены не пишет, а удаление пишет как
+    // удаление символа U+FFFC. Без этой обёртки Ctrl+Z после перерисовки
+    // или возврата в файл вставлял мусорный U+FFFC, и все более ранние шаги
+    // отмены попадали со сдвигом — портили текст. Необратимое действие
+    // очищает историю: отмена теряется, но текст не портится.
+    buffer.begin_irreversible_action();
     for (_, anchor) in positions {
         if anchor.is_deleted() {
             continue;
@@ -2730,6 +2881,7 @@ fn remove_path_anchors(
         end.forward_char();
         buffer.delete(&mut iter, &mut end);
     }
+    buffer.end_irreversible_action();
 }
 
 fn detach_child(widget: &impl IsA<gtk4::Widget>) {
@@ -2998,4 +3150,30 @@ fn resolve_image(from: &Path, dest: &str) -> Option<PathBuf> {
     let parent = from.parent().unwrap_or_else(|| Path::new("."));
     let path = parent.join(dest);
     path.canonicalize().ok().or(Some(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_span;
+
+    fn apply(old: &str, new: &str) -> String {
+        let (from, old_to, new_to) = changed_span(old, new);
+        format!("{}{}{}", &old[..from], &new[from..new_to], &old[old_to..])
+    }
+
+    #[test]
+    fn changed_span_is_minimal_and_char_safe() {
+        assert_eq!(changed_span("abc", "abc"), (3, 3, 3));
+        assert_eq!(changed_span("| а | б |\n", "| а | в | б |\n"), (7, 7, 12));
+        for (old, new) in [
+            ("ёж", "ём"),
+            ("жёлтый", "жёлтый дом"),
+            ("ааа", "а"),
+            ("", "текст"),
+            ("текст", ""),
+            ("строка ж", "строка ё"),
+        ] {
+            assert_eq!(apply(old, new), new, "{old} -> {new}");
+        }
+    }
 }

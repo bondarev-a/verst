@@ -221,7 +221,19 @@ enum Step {
     /// Изменить открытый файл на диске другой программой; `true` — в буфере
     /// перед этим есть несохранённая правка.
     ExternalWrite(bool),
+    /// Вставить строку в первую таблицу, затем отменить (Ctrl+Z).
+    TableRowUndo,
+    /// Правка, переход в другой файл и обратно, затем Ctrl+Z.
+    UndoAfterSwitch(std::path::PathBuf, u8),
+    /// Правка ячейки, выход из неё, затем Ctrl+Z.
+    CellUndo,
+    /// Открыть текущий файл и во второй панели, доложить о сетках таблиц.
+    SplitSame(std::path::PathBuf),
     Quit,
+}
+
+thread_local! {
+    static UNDO_ORIGINAL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 fn start_bench(ctx: Ctx) {
@@ -301,6 +313,41 @@ fn start_bench(ctx: Ctx) {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
         steps.push(Step::ExternalWrite(false));
         steps.push(Step::ExternalWrite(true));
+    }
+    if let Some(pair) = std::env::var_os("VERST_BENCH_UNDO_SWITCH") {
+        let paths: Vec<_> = std::env::split_paths(&pair).collect();
+        if paths.len() == 2 {
+            steps.push(Step::Go(paths[0].clone(), 0));
+            steps.push(Step::UndoAfterSwitch(paths[0].clone(), 0));
+            steps.push(Step::Go(paths[1].clone(), 0));
+            steps.push(Step::Go(paths[0].clone(), 0));
+            steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
+        }
+    }
+    if let Some(pair) = std::env::var_os("VERST_BENCH_SPLIT_OTHER") {
+        let paths: Vec<_> = std::env::split_paths(&pair).collect();
+        if paths.len() == 2 {
+            steps.push(Step::Go(paths[0].clone(), 0));
+            steps.push(Step::Action("split".to_string()));
+            steps.push(Step::SplitSame(paths[1].clone()));
+            // Обратно в первую панель: её таблицы должны вернуться.
+            steps.push(Step::Go(paths[0].clone(), 0));
+            steps.push(Step::Report("back_to_first".to_string()));
+        }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_SPLIT_SAME") {
+        let file = std::path::PathBuf::from(file);
+        steps.push(Step::Go(file.clone(), 0));
+        steps.push(Step::Action("split".to_string()));
+        steps.push(Step::SplitSame(file));
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_CELL_UNDO") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::CellUndo);
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_ROW_UNDO") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::TableRowUndo);
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -612,7 +659,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 );
                 print_totals("PROF   ", &take_totals());
                 let (tables, second, mapped) = ctx.table_grid_report();
-                eprintln!("PROF {label}: tables {tables}, pane2 grids {second}, mapped {mapped}");
+                let same = ctx.widgets.views[0].buffer() == ctx.widgets.views[1].buffer();
+                let pane2 = ctx.state.borrow().session.pane_paths.get(1).cloned().flatten();
+                eprintln!("PROF {label}: tables {tables}, pane2 grids {second}, mapped {mapped}, pane2_same_buffer {same}, pane2_file {pane2:?}");
                 save_shot(&ctx, &label);
                 run_steps(ctx, steps);
             });
@@ -648,6 +697,168 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     ctx.live_table_count()
                 );
                 run_steps(ctx, steps);
+            });
+        }
+        Step::UndoAfterSwitch(path, stage) => {
+            let buffer = ctx.focused_view().buffer();
+            if stage == 0 {
+                let original = ctx.buffer_text(&path).unwrap_or_default();
+                UNDO_ORIGINAL.with(|o| *o.borrow_mut() = original);
+                // Правка в конце файла, после всех таблиц.
+                let mut end = buffer.end_iter();
+                buffer.begin_user_action();
+                buffer.insert(&mut end, "\nМЕТКА_ОТМЕНЫ\n");
+                buffer.end_user_action();
+                eprintln!("PROF undo_switch typed, can_undo {}", buffer.can_undo());
+                glib::timeout_add_local_once(Duration::from_millis(900), move || run_steps(ctx, steps));
+                return;
+            }
+            glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                let can = buffer.can_undo();
+                for _ in 0..4 {
+                    if !buffer.can_undo() {
+                        break;
+                    }
+                    buffer.undo();
+                    if !ctx.buffer_text(&path).unwrap_or_default().contains("МЕТКА_ОТМЕНЫ") {
+                        break;
+                    }
+                }
+                glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                    let after = ctx.buffer_text(&path).unwrap_or_default();
+                    let original = UNDO_ORIGINAL.with(|o| o.borrow().clone());
+                    let slice = buffer.slice(&buffer.start_iter(), &buffer.end_iter(), true);
+                    let literal = slice.matches('\u{FFFC}').count() as i64 - ctx.live_table_count() as i64;
+                    let diff = original
+                        .chars()
+                        .zip(after.chars())
+                        .position(|(a, b)| a != b);
+                    eprintln!(
+                        "PROF undo_switch: can_undo {can}, mark_left {}, equal_original {}, len {} -> {}, first_diff {:?}, extra_fffc {literal}",
+                        after.contains("МЕТКА_ОТМЕНЫ"),
+                        after == original,
+                        original.chars().count(),
+                        after.chars().count(),
+                        diff
+                    );
+                    run_steps(ctx, steps);
+                });
+            });
+        }
+        Step::SplitSame(file) => {
+            ctx.widgets.views[1].grab_focus();
+            ctx.go(file, None);
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                let (tables, second, mapped) = ctx.table_grid_report();
+                let first = ctx.first_pane_grid_count();
+                let same = ctx.widgets.views[0].buffer() == ctx.widgets.views[1].buffer();
+                eprintln!("PROF split_same: same_buffer {same}, tables {tables}, pane1 grids {first}, pane2 grids {second}, mapped {mapped}");
+                run_steps(ctx, steps);
+            });
+        }
+        Step::CellUndo => {
+            let Some(path) = ctx.focused_path() else {
+                run_steps(ctx, steps);
+                return;
+            };
+            let view = ctx.focused_view();
+            let buffer = view.buffer();
+            let before = ctx.buffer_text(&path).unwrap_or_default();
+            let mut line = 0;
+            while line < buffer.line_count() {
+                let Some(start) = buffer.iter_at_line(line) else { break };
+                let mut end = start;
+                end.forward_to_line_end();
+                if buffer.text(&start, &end, true).starts_with("| ") {
+                    break;
+                }
+                line += 1;
+            }
+            if let Some(iter) = buffer.iter_at_line(line + 3) {
+                buffer.place_cursor(&iter);
+            }
+            let typed = ctx.bench_type_in_cell("МЕТКА_ЯЧЕЙКИ");
+            ctx.deactivate_table_cells();
+            let edited = ctx.buffer_text(&path).unwrap_or_default().contains("МЕТКА_ЯЧЕЙКИ");
+            glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                let can = buffer.can_undo();
+                buffer.undo();
+                glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                    let after = ctx.buffer_text(&path).unwrap_or_default();
+                    let can_redo = buffer.can_redo();
+                    buffer.redo();
+                    let redone = ctx.buffer_text(&path).unwrap_or_default();
+                    eprintln!(
+                        "PROF cell_undo: typed {typed}, edited {edited}, can_undo {can}, restored {}, redo {can_redo} brings_back {}, tables live {}",
+                        after == before,
+                        redone.contains("МЕТКА_ЯЧЕЙКИ"),
+                        ctx.live_table_count()
+                    );
+                    run_steps(ctx, steps);
+                });
+            });
+        }
+        Step::TableRowUndo => {
+            let Some(path) = ctx.focused_path() else {
+                run_steps(ctx, steps);
+                return;
+            };
+            let buffer = ctx.focused_view().buffer();
+            let before = ctx.buffer_text(&path).unwrap_or_default();
+            let rows = |text: &str| {
+                text_workspace::tables::parse_tables(text)
+                    .first()
+                    .map_or(0, |t| t.row_count())
+            };
+            buffer.set_enable_undo(true);
+            let undo_before = buffer.can_undo();
+            ctx.table_add_row(path.clone(), 0);
+            let added = ctx.buffer_text(&path).unwrap_or_default();
+            let can_undo = buffer.can_undo();
+            glib::timeout_add_local_once(Duration::from_millis(700), move || {
+                // Как пользователь: Esc из ячейки, затем Ctrl+Z в тексте.
+                let cell_was_active = ctx.any_table_cell_focused();
+                ctx.deactivate_table_cells();
+                eprintln!("PROF row_undo cell_was_active {cell_was_active}");
+                buffer.undo();
+                let buffer = buffer.clone();
+                let added = added.clone();
+                glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                    let after = ctx.buffer_text(&path).unwrap_or_default();
+                    let literal = {
+                        let mut iter = buffer.start_iter();
+                        let mut n = 0;
+                        loop {
+                            if iter.char() == '\u{FFFC}' && iter.child_anchor().is_none() {
+                                n += 1;
+                            }
+                            if !iter.forward_char() {
+                                break;
+                            }
+                        }
+                        n
+                    };
+                    eprintln!("PROF row_undo literal_fffc {literal}");
+                    if after != before {
+                        let at = before.chars().zip(after.chars()).position(|(a, b)| a != b).unwrap_or(0);
+                        let b: String = before.chars().skip(at.saturating_sub(20)).take(60).collect();
+                        let a: String = after.chars().skip(at.saturating_sub(20)).take(60).collect();
+                        eprintln!("PROF row_undo diff at {at}: before {b:?} after {a:?}");
+                        let m: String = added.chars().skip(at.saturating_sub(20)).take(120).collect();
+                        eprintln!("PROF row_undo added near: {m:?}");
+                        let at2 = before.chars().rev().zip(after.chars().rev()).position(|(a, b)| a != b).unwrap_or(0);
+                        eprintln!("PROF row_undo tail diff from end {at2}, lens {} {} {}", before.chars().count(), added.chars().count(), after.chars().count());
+                    }
+                    eprintln!(
+                        "PROF row_undo: can_undo before {undo_before}, after add {can_undo}, rows {} -> {} -> {}, restored {}, tables live {}",
+                        rows(&before),
+                        rows(&added),
+                        rows(&after),
+                        after == before,
+                        ctx.live_table_count()
+                    );
+                    run_steps(ctx, steps);
+                });
             });
         }
         Step::TypeAndClose => {
