@@ -242,6 +242,8 @@ enum Step {
     /// Длинный текст в ячейку первой таблицы, переход в другую ячейку:
     /// строка после таблицы должна остаться видимой.
     CellTab,
+    /// Пять раз «найти далее» по слову, которое есть и в таблицах, и в тексте.
+    FindCheck(String),
     Quit,
 }
 
@@ -341,6 +343,12 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
         }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_FIND") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::FindCheck(
+            std::env::var("VERST_BENCH_FIND_WORD").unwrap_or_else(|_| "решение".into()),
+        ));
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL_TAB") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -782,6 +790,23 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     run_steps(ctx, steps);
                 });
             });
+        }
+        Step::FindCheck(word) => {
+            ctx.widgets.find_entry.set_text(&word);
+            let buffer = ctx.focused_view().buffer();
+            buffer.place_cursor(&buffer.start_iter());
+            let mut hits = Vec::new();
+            for _ in 0..5 {
+                ctx.find_move(true);
+                let at = buffer
+                    .selection_bounds()
+                    .map(|(a, _)| a.line())
+                    .unwrap_or(-1);
+                hits.push((at, ctx.focused_table_cell()));
+            }
+            eprintln!("PROF find {word}: (строка, ячейка) {hits:?}");
+            ctx.deactivate_table_cells();
+            run_steps(ctx, steps);
         }
         Step::CellTab => {
             let Some(path) = ctx.focused_path() else {

@@ -4190,19 +4190,62 @@ impl Ctx {
         let view = self.focused_view();
         let buffer = view.buffer();
         let flags = gtk4::TextSearchFlags::CASE_INSENSITIVE | gtk4::TextSearchFlags::TEXT_ONLY;
+        let rendered = self.editing_markdown();
+        // После совпадения в таблице курсор стоит на якоре таблицы, а поиск
+        // продолжается с её конца (иначе он снова находил то же место).
+        let resume = buffer
+            .mark("tw-find-resume")
+            .filter(|_| forward && self.any_table_cell_focused())
+            .map(|mark| buffer.iter_at_mark(&mark));
+        if self.any_table_cell_focused() {
+            self.deactivate_table_cells();
+        }
         let (start, end) = buffer.selection_bounds().unwrap_or_else(|| {
             let iter = buffer.iter_at_offset(buffer.cursor_position().max(0));
-            (iter.clone(), iter)
+            (iter, iter)
         });
-        let found = if forward {
-            end.forward_search(&query, flags, None)
-                .or_else(|| buffer.start_iter().forward_search(&query, flags, None))
-        } else {
-            start
-                .backward_search(&query, flags, None)
-                .or_else(|| buffer.end_iter().backward_search(&query, flags, None))
+        let from_forward = resume.unwrap_or(end);
+        let search = |flags: gtk4::TextSearchFlags| {
+            if forward {
+                from_forward
+                    .forward_search(&query, flags, None)
+                    .or_else(|| buffer.start_iter().forward_search(&query, flags, None))
+            } else {
+                start
+                    .backward_search(&query, flags, None)
+                    .or_else(|| buffer.end_iter().backward_search(&query, flags, None))
+            }
         };
-        if let Some((mut match_start, match_end)) = found {
+        // В отрисованном Markdown исходник таблиц и знаки разметки скрыты.
+        // Раньше совпадение в скрытом исходнике выделялось невидимо, курсор
+        // включал ячейку (0,0), и следующий поиск находил то же место снова.
+        // Теперь: ближайшее видимое совпадение, а если раньше него есть
+        // совпадение в таблице — открывается ячейка с ним.
+        let visible = if rendered {
+            search(flags | gtk4::TextSearchFlags::VISIBLE_ONLY)
+        } else {
+            search(flags)
+        };
+        if rendered {
+            if let Some((hit, _)) = search(flags) {
+                let earlier = match &visible {
+                    None => true,
+                    Some((v, _)) => {
+                        let wrapped_v = if forward { v < &from_forward } else { v > &start };
+                        let wrapped_h = if forward { hit < from_forward } else { hit > start };
+                        match (wrapped_h, wrapped_v) {
+                            (false, true) => true,
+                            (true, false) => false,
+                            _ => if forward { hit < *v } else { hit > *v },
+                        }
+                    }
+                };
+                if earlier && self.open_find_hit_in_table(&buffer, &hit) {
+                    return;
+                }
+            }
+        }
+        if let Some((mut match_start, match_end)) = visible {
             buffer.select_range(&match_start, &match_end);
             view.scroll_to_iter(&mut match_start, 0.1, true, 0.0, 0.3);
             view.grab_focus();

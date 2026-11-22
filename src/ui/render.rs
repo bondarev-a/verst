@@ -831,6 +831,59 @@ impl Ctx {
         Some((path, table, row, col))
     }
 
+    /// Совпадение поиска внутри исходника таблицы: открыть ячейку с ним и
+    /// запомнить конец таблицы, чтобы следующий поиск шёл дальше.
+    /// `false` — совпадение не в таблице.
+    pub(super) fn open_find_hit_in_table(
+        &self,
+        buffer: &gtk4::TextBuffer,
+        hit: &gtk4::TextIter,
+    ) -> bool {
+        let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() else {
+            return false;
+        };
+        let text = buffer_text_of(source);
+        let byte = file_byte_at_iter(buffer, hit);
+        let tables = tables::parse_tables(&text);
+        let Some((index, table)) = tables
+            .iter()
+            .enumerate()
+            .find(|(_, table)| table.start <= byte && byte < table.end)
+        else {
+            return false;
+        };
+        if !self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .any(|live| live.index == index && !live.anchor.is_deleted())
+        {
+            return false;
+        }
+        let mut cell_at = None;
+        for row in 0..table.row_count() {
+            for col in 0..table.column_count() {
+                if let Some(cell) = table.cell(row, col) {
+                    if cell.start <= byte && byte <= cell.end {
+                        cell_at = Some((row, col));
+                    }
+                }
+            }
+        }
+        let (row, col) = cell_at.unwrap_or((0, 0));
+        let end = TextMap::new(source, &text).iter(source, &text, table.end);
+        match buffer.mark("tw-find-resume") {
+            Some(mark) => buffer.move_mark(&mark, &end),
+            None => {
+                buffer.create_mark(Some("tw-find-resume"), &end, true);
+            }
+        }
+        self.activate_table_cell(index, row, col);
+        true
+    }
+
     pub(super) fn focused_table_cell(&self) -> Option<(usize, usize, usize)> {
         let state = self.state.borrow();
         state.render.tables.iter().find_map(|item| {
