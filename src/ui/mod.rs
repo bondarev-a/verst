@@ -54,6 +54,14 @@ fn media_page(uri: &str, video: bool) -> String {
     )
 }
 
+/// Содержимое бокового списка, по которому решается, перестраивать ли его.
+#[derive(PartialEq)]
+enum SideContent {
+    Outline(Vec<markdown::Heading>),
+    Links(Vec<PathBuf>, String),
+    Tags(Vec<String>, Option<String>),
+}
+
 fn fill_outline(list: &gtk4::ListBox, headings: &[markdown::Heading]) {
     clear_list(list);
     if headings.is_empty() {
@@ -250,6 +258,10 @@ pub(super) struct State {
     notes_stale: bool,
     /// Свёрнутые ветки дерева заметок (ключи вида «2026/11»).
     notes_collapsed: std::collections::HashSet<String>,
+    /// Что показано в боковых списках (оглавление, ссылки, метки тегов).
+    /// Пауза в наборе пересчитывает их, но перестраивать виджеты нужно, только
+    /// если содержимое изменилось: при 200 ссылках это 25–35 мс на паузу.
+    side_shown: std::collections::HashMap<&'static str, SideContent>,
     /// Адрес, который предпросмотр грузит сам (без фрагмента). Остальные
     /// переходы без клика — из содержимого страницы — запрещены.
     preview_expect: Option<String>,
@@ -1164,6 +1176,7 @@ impl Ctx {
                 notes_shown: None,
                 notes_stale: false,
                 notes_collapsed: Default::default(),
+                side_shown: Default::default(),
                 preview_expect: None,
                 side_tick: 0,
                 links_gen: 0,
@@ -3076,7 +3089,9 @@ impl Ctx {
     fn refresh_outline(&self) {
     let _prof = crate::ui::prof::span("refresh_outline");
         let headings = self.outline_headings();
-        fill_outline(&self.widgets.outline_list, &headings);
+        if self.side_changed("outline", SideContent::Outline(headings.clone())) {
+            fill_outline(&self.widgets.outline_list, &headings);
+        }
         self.state.borrow_mut().headings = headings;
     }
 
@@ -3681,6 +3696,16 @@ impl Ctx {
 
     fn refresh_tag_chips(&self) {
     let _prof = crate::ui::prof::span("refresh_tag_chips");
+        let wanted = self
+            .focused_path()
+            .filter(|path| is_markdown(path))
+            .and_then(|path| self.buffer_text(&path))
+            .map(|text| markdown::extract_tags(&text))
+            .unwrap_or_default();
+        let active = self.state.borrow().tag_query.clone();
+        if !self.side_changed("tags", SideContent::Tags(wanted, active)) {
+            return;
+        }
         while let Some(child) = self.widgets.tag_box.first_child() {
             self.widgets.tag_box.remove(&child);
         }
@@ -3716,6 +3741,17 @@ impl Ctx {
             button.connect_clicked(move |_| ctx.show_tag(&chosen));
             self.widgets.tag_box.append(&button);
         }
+    }
+
+    /// Запомнить, что показано в боковом списке `key`. `false` — то же самое
+    /// уже показано, виджеты можно не перестраивать.
+    fn side_changed(&self, key: &'static str, content: SideContent) -> bool {
+        let mut state = self.state.borrow_mut();
+        if state.side_shown.get(key) == Some(&content) {
+            return false;
+        }
+        state.side_shown.insert(key, content);
+        true
     }
 
     fn show_tag(&self, raw: &str) {
@@ -3827,6 +3863,16 @@ impl Ctx {
     }
 
     fn fill_link_box(&self, parent: &gtk4::Box, files: &[PathBuf], empty: &str) {
+        let key = if *parent == self.widgets.incoming_list {
+            "incoming"
+        } else if *parent == self.widgets.outgoing_list {
+            "outgoing"
+        } else {
+            "links"
+        };
+        if !self.side_changed(key, SideContent::Links(files.to_vec(), empty.to_string())) {
+            return;
+        }
         clear_box(parent);
         if files.is_empty() {
             let label = gtk4::Label::new(Some(empty));
