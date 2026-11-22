@@ -242,6 +242,14 @@ pub(super) struct State {
     /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
     keep_space_tree: bool,
     preview_tick: u64,
+    /// Разобранные заметки: подпись и теги по пути, с mtime и размером файла.
+    notes_cache: std::collections::HashMap<PathBuf, notes::NoteMeta>,
+    /// Что сейчас нарисовано в панели заметок; при совпадении не пересобираем.
+    notes_shown: Option<notes::NotesView>,
+    /// Панель заметок не видна, а заметки менялись: обновить при показе.
+    notes_stale: bool,
+    /// Свёрнутые ветки дерева заметок (ключи вида «2026/11»).
+    notes_collapsed: std::collections::HashSet<String>,
     /// Адрес, который предпросмотр грузит сам (без фрагмента). Остальные
     /// переходы без клика — из содержимого страницы — запрещены.
     preview_expect: Option<String>,
@@ -1152,6 +1160,10 @@ impl Ctx {
                 pending_view_line: None,
                 keep_space_tree: false,
                 preview_tick: 0,
+                notes_cache: Default::default(),
+                notes_shown: None,
+                notes_stale: false,
+                notes_collapsed: Default::default(),
                 preview_expect: None,
                 side_tick: 0,
                 links_gen: 0,
@@ -1608,6 +1620,15 @@ impl Ctx {
             });
         }
         let ctx = self.clone();
+        // Панель заметок обновляется при показе, если заметки менялись, пока
+        // она была скрыта (refresh_notes скрытую панель не перестраивает).
+        let notes_ctx = self.clone();
+        self.widgets.notes_host.connect_map(move |_| {
+            if notes_ctx.state.borrow().notes_stale {
+                let ctx = notes_ctx.clone();
+                glib::idle_add_local_once(move || ctx.refresh_notes());
+            }
+        });
         self.widgets.right_paned.connect_map(move |_| {
             let ctx = ctx.clone();
             glib::idle_add_local_once(move || ctx.apply_info_dock());

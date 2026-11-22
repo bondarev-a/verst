@@ -47,11 +47,26 @@ impl Ctx {
         true
     }
 
+    /// Перестроить панель заметок.
+    ///
+    /// Вызывается и после каждого автосохранения заметки. Раньше каждый раз
+    /// читались все заметки с диска и заново создавались все строки: при
+    /// 1000 заметок окно замирало на 130–170 мс после каждой паузы в наборе,
+    /// а свёрнутые ветки раскрывались. Теперь файл перечитывается, только
+    /// если у него сменились время изменения или размер; панель
+    /// пересобирается, только если поменялось то, что в ней видно; скрытая
+    /// панель обновляется при показе.
     pub(super) fn refresh_notes(&self) {
     let _prof = crate::ui::prof::span("refresh_notes");
+        if !self.widgets.notes_host.is_mapped() {
+            self.state.borrow_mut().notes_stale = true;
+            return;
+        }
+        self.state.borrow_mut().notes_stale = false;
         let dir = notes::notes_dir();
         let filter = self.state.borrow().session.note_tag.clone();
         let mut found = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -61,28 +76,28 @@ impl Ctx {
                 if kind.is_dir() || !is_markdown(&path) {
                     continue;
                 }
-                let text = self.note_text(&path);
-                let tags = markdown::extract_tags(&text);
-                let stem = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("заметка")
-                    .to_string();
                 let meta = entry.metadata().ok();
                 let modified = meta
                     .as_ref()
                     .and_then(|meta| meta.modified().ok())
                     .unwrap_or(SystemTime::UNIX_EPOCH);
                 let created = meta.as_ref().and_then(|meta| meta.created().ok());
+                let len = meta.as_ref().map_or(0, |meta| meta.len());
+                let (label, tags) = self.note_meta(&path, modified, len);
+                seen.insert(path.clone());
                 found.push(InboxNote {
                     path,
-                    label: notes::note_label(&text, &stem),
+                    label,
                     tags,
                     created,
                     modified,
                 });
             }
         }
+        self.state
+            .borrow_mut()
+            .notes_cache
+            .retain(|path, _| seen.contains(path));
         found.sort_by(|left, right| right.modified.cmp(&left.modified));
         let mut filter = filter;
         if filter.as_ref().is_some_and(|tag| {
@@ -94,14 +109,35 @@ impl Ctx {
             self.save_session();
             filter = None;
         }
-        self.fill_note_tags(&found, filter.as_deref());
         let group = notes::note_group(&self.state.borrow().session.note_group);
         self.mark_note_group(group);
         let mut visible: Vec<_> = found
-            .into_iter()
+            .iter()
             .filter(|note| notes::has_tag(&note.tags, filter.as_deref()))
+            .cloned()
             .collect();
         sort_notes(&mut visible, group);
+        let view = NotesView {
+            group,
+            filter: filter.clone(),
+            all_tags: found.iter().flat_map(|note| note.tags.clone()).collect(),
+            rows: visible
+                .iter()
+                .map(|note| {
+                    (
+                        note.path.clone(),
+                        note.label.clone(),
+                        note.tags.clone(),
+                        note_stamp(note, group),
+                    )
+                })
+                .collect(),
+        };
+        if self.state.borrow().notes_shown.as_ref() == Some(&view) {
+            return;
+        }
+        self.state.borrow_mut().notes_shown = Some(view);
+        self.fill_note_tags(&found, filter.as_deref());
         clear_note_host(&self.widgets.notes_host);
         if visible.is_empty() {
             self.widgets
@@ -163,7 +199,7 @@ impl Ctx {
                 }
                 self.widgets
                     .notes_host
-                    .append(&note_branch("Без даты", &box_));
+                    .append(&self.note_branch("none".into(), "Без даты", &box_));
                 index += 1;
                 continue;
             }
@@ -180,14 +216,22 @@ impl Ctx {
                             day_box.append(&self.note_row(note));
                         }
                     }
-                    month_box.append(&note_branch(&days[index].day.to_string(), &day_box));
+                    month_box.append(&self.note_branch(
+                        format!("{year}/{month}/{}", days[index].day),
+                        &days[index].day.to_string(),
+                        &day_box,
+                    ));
                     index += 1;
                 }
-                year_box.append(&note_branch(month_name(month), &month_box));
+                year_box.append(&self.note_branch(
+                    format!("{year}/{month}"),
+                    month_name(month),
+                    &month_box,
+                ));
             }
             self.widgets
                 .notes_host
-                .append(&note_branch(&year.to_string(), &year_box));
+                .append(&self.note_branch(year.to_string(), &year.to_string(), &year_box));
         }
     }
 
@@ -206,7 +250,9 @@ impl Ctx {
                 .as_deref()
                 .map(|tag| format!("#{tag}"))
                 .unwrap_or_else(|| "Без тега".to_string());
-            self.widgets.notes_host.append(&note_branch(&title, &box_));
+            self.widgets
+                .notes_host
+                .append(&self.note_branch(format!("tag:{title}"), &title, &box_));
         }
     }
 
@@ -595,14 +641,55 @@ impl Ctx {
         }
     }
 
-    fn note_text(&self, path: &Path) -> String {
+    /// Подпись и теги заметки. Открытая заметка — по тексту в редакторе,
+    /// остальные — из кэша, пока у файла те же время изменения и размер.
+    fn note_meta(&self, path: &Path, modified: SystemTime, len: u64) -> (String, Vec<String>) {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("заметка")
+            .to_string();
         if let Some(text) = self.buffer_text(path) {
-            return text;
+            return (notes::note_label(&text, &stem), markdown::extract_tags(&text));
         }
-        fs::read_to_string(path).unwrap_or_default()
+        if let Some(meta) = self.state.borrow().notes_cache.get(path) {
+            if meta.modified == modified && meta.len == len {
+                return (meta.label.clone(), meta.tags.clone());
+            }
+        }
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let label = notes::note_label(&text, &stem);
+        let tags = markdown::extract_tags(&text);
+        self.state.borrow_mut().notes_cache.insert(
+            path.to_path_buf(),
+            NoteMeta {
+                modified,
+                len,
+                label: label.clone(),
+                tags: tags.clone(),
+            },
+        );
+        (label, tags)
     }
 }
 
+pub(super) struct NoteMeta {
+    modified: SystemTime,
+    len: u64,
+    label: String,
+    tags: Vec<String>,
+}
+
+/// Видимое содержимое панели заметок.
+#[derive(PartialEq)]
+pub(super) struct NotesView {
+    group: notes::NoteGroup,
+    filter: Option<String>,
+    all_tags: std::collections::BTreeSet<String>,
+    rows: Vec<(PathBuf, String, Vec<String>, (i32, u32, u32))>,
+}
+
+#[derive(Clone)]
 struct InboxNote {
     path: PathBuf,
     label: String,
@@ -693,11 +780,24 @@ fn month_name(month: u32) -> &'static str {
     }
 }
 
-fn note_branch(title: &str, child: &impl IsA<gtk4::Widget>) -> gtk4::Expander {
-    let branch = gtk4::Expander::new(Some(title));
-    branch.set_expanded(true);
-    branch.set_child(Some(child));
-    branch
+impl Ctx {
+    /// Ветка дерева заметок. Свёрнутые ветки остаются свёрнутыми после
+    /// перестройки панели (раньше каждое сохранение раскрывало их снова).
+    fn note_branch(&self, key: String, title: &str, child: &impl IsA<gtk4::Widget>) -> gtk4::Expander {
+        let branch = gtk4::Expander::new(Some(title));
+        branch.set_expanded(!self.state.borrow().notes_collapsed.contains(&key));
+        branch.set_child(Some(child));
+        let state = self.state.clone();
+        branch.connect_expanded_notify(move |branch| {
+            let mut state = state.borrow_mut();
+            if branch.is_expanded() {
+                state.notes_collapsed.remove(&key);
+            } else {
+                state.notes_collapsed.insert(key.clone());
+            }
+        });
+        branch
+    }
 }
 
 fn scrolled_list(child: &impl IsA<gtk4::Widget>) -> gtk4::ScrolledWindow {
