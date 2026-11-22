@@ -1,6 +1,6 @@
 [package]
 name = "text_workspace"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 rust-version = "1.87"
 description = "Локальный редактор текстовых файлов с навигацией как в IDE"
