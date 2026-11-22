@@ -16,10 +16,11 @@ fn main() -> gtk4::glib::ExitCode {
     // почти вдвое дольше. Тогда cairo, если пользователь не выбрал сам.
     text_workspace::graphics::prefer_cairo_without_gpu();
     text_workspace::graphics::lighten_webkit_without_gpu();
-    // Профиль AppArmor закрывает только /usr/bin/verst. Локальная копия
-    // иначе падает сразу: bwrap не может создать user namespace.
-    if std::env::current_exe().ok().as_deref() != Some(std::path::Path::new("/usr/bin/verst")) {
-        std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+    // Профиль AppArmor пакета открывает user namespace для /usr/bin/verst.
+    // Другой копии песочница WebKit нужна так же; выключаем её, только если
+    // bwrap на этой системе её создать не может (иначе WebKit падает).
+    if text_workspace::sandbox::disable_if_unusable(std::path::Path::new("/usr/bin/verst")) {
+        eprintln!("verst: песочница WebKit выключена — bwrap не может её создать");
     }
     let app = gtk4::Application::builder()
         .application_id("local.textworkspace")

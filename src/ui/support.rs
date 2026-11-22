@@ -2057,6 +2057,23 @@ pub(super) fn publish_window_icon(window: &gtk4::ApplicationWindow) {
     }
 }
 
+/// Аргумент строки Exec= по спецификации .desktop: в кавычках, если есть
+/// пробелы или спецсимволы (иначе ярлык к пути с пробелами не работал).
+fn desktop_exec_arg(arg: &str) -> String {
+    if !arg.chars().any(|c| c.is_whitespace() || "\"'\\$`;&|<>()*?#~".contains(c)) {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
 pub(super) fn install_launcher_icon() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     if home.as_os_str().is_empty() {
@@ -2078,14 +2095,9 @@ pub(super) fn install_launcher_icon() -> Option<PathBuf> {
         fs::write(&icon_path, LAUNCHER_ICON).ok()?;
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("text_workspace"));
-    let exec = if exe == Path::new("/usr/bin/verst") {
-        format!("{} %U", exe.display())
-    } else {
-        format!(
-            "env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 {} %U",
-            exe.display()
-        )
-    };
+    // Песочницу WebKit программа выключает сама, только если bwrap её не
+    // создаёт (text_workspace::sandbox). Раньше ярлык выключал её всегда.
+    let exec = format!("{} %U", desktop_exec_arg(&exe.display().to_string()));
     let desktop = format!(
         "[Desktop Entry]\n\
 Type=Application\n\
@@ -2233,6 +2245,16 @@ mod tests {
         assert!(write_atomic(&path, &big).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "старый текст");
         let _ = fs::remove_file(&filler);
+    }
+
+    #[test]
+    fn exec_line_quotes_paths_with_spaces() {
+        assert_eq!(desktop_exec_arg("/usr/bin/verst"), "/usr/bin/verst");
+        assert_eq!(
+            desktop_exec_arg("/home/u/Ubuntu apps/verst"),
+            "\"/home/u/Ubuntu apps/verst\""
+        );
+        assert_eq!(desktop_exec_arg("/a/$b\"c"), "\"/a/\\$b\\\"c\"");
     }
 
     #[test]

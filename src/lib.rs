@@ -15,6 +15,7 @@ pub mod markdown;
 pub mod markup;
 pub mod notes;
 pub mod places;
+pub mod sandbox;
 pub mod seams;
 pub mod session;
 pub mod tables;

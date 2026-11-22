@@ -229,6 +229,8 @@ enum Step {
     CellUndo,
     /// Открыть текущий файл и во второй панели, доложить о сетках таблиц.
     SplitSame(std::path::PathBuf),
+    /// Снимок окна через 1,5 с (страница WebKit успевает загрузиться).
+    Shot(String),
     Quit,
 }
 
@@ -246,9 +248,14 @@ fn start_bench(ctx: Ctx) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
     let mut steps = Vec::new();
+    let shots = std::env::var_os("VERST_BENCH_SHOT_EACH").is_some();
     for round in 1..=rounds {
         for file in &files {
             steps.push(Step::Go(file.clone(), round));
+            if shots {
+                let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                steps.push(Step::Shot(name));
+            }
         }
     }
     if let Some(scroll) = std::env::var_os("VERST_BENCH_SCROLL") {
@@ -745,6 +752,12 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 });
             });
         }
+        Step::Shot(name) => {
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                save_shot(&ctx, &name);
+                glib::timeout_add_local_once(Duration::from_millis(500), move || run_steps(ctx, steps));
+            });
+        }
         Step::SplitSame(file) => {
             ctx.widgets.views[1].grab_focus();
             ctx.go(file, None);
@@ -1039,4 +1052,12 @@ fn mem_report() -> String {
     }
     let after = anon();
     format!("rss_anon {before:.1} MB, after trim {after:.1} MB")
+}
+
+/// Для замеров: решение по переходу в предпросмотре.
+pub(super) fn note_nav(uri: &str, clicked: bool, allowed: bool) {
+    if std::env::var_os("VERST_PROF").is_some() {
+        let short: String = uri.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
+        eprintln!("PROF nav clicked={clicked} allowed={allowed} {short}");
+    }
 }

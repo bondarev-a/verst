@@ -164,9 +164,11 @@ install_user() {
   install -m 0755 "$binary" "$HOME/.local/bin/verst"
   install -m 0644 "$here/verst.png" "$HOME/.local/share/icons/hicolor/256x256/apps/verst.png"
   desktop="$HOME/.local/share/applications/local.textworkspace.desktop"
-  # Профиль AppArmor закрывает только /usr/bin/verst. Локальный бинарник
-  # без этого переменного окружения падает в bwrap: Permission denied.
-  sed "s|^Exec=.*|Exec=env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 $HOME/.local/bin/verst %U|" \
+  # Песочницу WebKit программа выключает сама, только если bwrap на этой
+  # системе её не создаёт (Ubuntu 24.04 без профиля AppArmor). Тогда в строке
+  # состояния будет предупреждение; системная установка (--system) ставит
+  # профиль и сохраняет песочницу.
+  sed "s|^Exec=.*|Exec=\"$HOME/.local/bin/verst\" %U|" \
     "$here/local.textworkspace.desktop" >"$desktop"
   chmod 0644 "$desktop"
   if command -v update-desktop-database >/dev/null 2>&1; then

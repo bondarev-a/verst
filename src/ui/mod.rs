@@ -242,6 +242,9 @@ pub(super) struct State {
     /// Вход в раздел «Пространства» из кода не сбрасывает уже открытое дерево.
     keep_space_tree: bool,
     preview_tick: u64,
+    /// Адрес, который предпросмотр грузит сам (без фрагмента). Остальные
+    /// переходы без клика — из содержимого страницы — запрещены.
+    preview_expect: Option<String>,
     side_tick: u64,
     /// Растёт, когда меняется то, от чего зависят ссылки: индекс, граф
     /// чужого пина, активный пин. Кеши ссылок с другим значением устарели.
@@ -646,11 +649,13 @@ impl Ctx {
         editors.set_position(10_000);
         editors.set_vexpand(true);
 
-        let preview = webkit6::WebView::new();
+        let preview = offline_web_view();
         let settings = webkit6::Settings::new();
         settings.set_enable_javascript(false);
         settings.set_enable_javascript_markup(false);
-        settings.set_allow_file_access_from_file_urls(true);
+        settings.set_allow_file_access_from_file_urls(false);
+        settings.set_allow_universal_access_from_file_urls(false);
+        settings.set_enable_hyperlink_auditing(false);
         settings.set_auto_load_images(true);
         settings.set_enable_media(true);
         settings.set_media_playback_requires_user_gesture(true);
@@ -1147,6 +1152,7 @@ impl Ctx {
                 pending_view_line: None,
                 keep_space_tree: false,
                 preview_tick: 0,
+                preview_expect: None,
                 side_tick: 0,
                 links_gen: 0,
             })),
@@ -1846,12 +1852,21 @@ impl Ctx {
                 let Some(uri) = request.uri() else {
                     return false;
                 };
-                // load_uri сам открывает pdf и картинку. Клик по file: из страницы по-прежнему глушим.
-                let navigation = action.navigation_type();
-                if uri.starts_with("file:")
-                    && navigation != webkit6::NavigationType::LinkClicked
-                    && navigation != webkit6::NavigationType::FormSubmitted
-                {
+                // Переходы по ссылкам — только по клику пользователя. Без клика
+                // разрешена лишь страница, которую загрузило само приложение:
+                // иначе <meta refresh> или <iframe> в чужой заметке открывали
+                // произвольный файл (twopen:) или показывали file: вне её.
+                // JavaScript в предпросмотре выключен (кроме встроенного
+                // просмотрщика PDF), поэтому LinkClicked бывает только от
+                // настоящего клика.
+                let clicked = action.navigation_type() == webkit6::NavigationType::LinkClicked;
+                let allowed = clicked || ctx.preview_expects(&uri);
+                crate::ui::prof::note_nav(&uri, clicked, allowed);
+                if !allowed {
+                    decision.ignore();
+                    return true;
+                }
+                if !clicked {
                     return false;
                 }
                 ctx.handle_uri(&uri, decision)
@@ -3174,7 +3189,7 @@ impl Ctx {
     }
 
     fn write_pdf(&self, html: String, base: PathBuf, dest: PathBuf) {
-        let web = webkit6::WebView::new();
+        let web = offline_web_view();
         if let Some(settings) = WebViewExt::settings(&web) {
             settings.set_enable_javascript(false);
             settings.set_enable_javascript_markup(false);
@@ -3242,6 +3257,7 @@ impl Ctx {
         let view_mode = self.state.borrow().view_mode;
         let Some(path) = self.focused_path() else {
             self.clear_picture();
+            self.expect_preview("about:blank");
             self.widgets
                 .preview
                 .load_html("<p>Файл не открыт.</p>", None);
@@ -3258,14 +3274,15 @@ impl Ctx {
             kind::Shown::WebImage | kind::Shown::Pdf => {
                 self.clear_picture();
                 self.arm_preview(matches!(kind::shown(&path), kind::Shown::Pdf));
-                self.widgets
-                    .preview
-                    .load_uri(&gio::File::for_path(&path).uri());
+                let uri = gio::File::for_path(&path).uri();
+                self.expect_preview(&uri);
+                self.widgets.preview.load_uri(&uri);
                 return;
             }
             kind::Shown::Audio | kind::Shown::Video => {
                 self.clear_picture();
                 self.arm_preview(false);
+                self.expect_preview(&gio::File::for_path(&path).uri());
                 self.widgets.preview.load_html(
                     &media_page(
                         &gio::File::for_path(&path).uri(),
@@ -3282,6 +3299,7 @@ impl Ctx {
                     return;
                 };
                 let base = path.parent().unwrap_or_else(|| Path::new("/"));
+                self.expect_preview(&gio::File::for_path(base).uri());
                 self.widgets.preview.load_bytes(
                     &glib::Bytes::from(text.as_bytes()),
                     Some("image/svg+xml"),
@@ -3297,6 +3315,7 @@ impl Ctx {
                     return;
                 };
                 let base = path.parent().unwrap_or_else(|| Path::new("/"));
+                self.expect_preview(&gio::File::for_path(base).uri());
                 self.widgets
                     .preview
                     .load_html(&text, Some(&gio::File::for_path(base).uri()));
@@ -3306,6 +3325,7 @@ impl Ctx {
         }
         self.clear_picture();
         if !is_markdown(&path) {
+            self.expect_preview("about:blank");
             self.widgets.preview.load_html(
                 "<p>Предпросмотр доступен для Markdown, HTML и SVG.</p>",
                 None,
@@ -3331,7 +3351,12 @@ impl Ctx {
             "twmissing:",
         );
         self.arm_preview(false);
-        self.widgets.preview.load_html(&html, None);
+        // Каталог заметки как база: относительные картинки (![](pic.png))
+        // находятся так же, как в редакторе. Без базы они не показывались.
+        let base = gio::File::for_path(path.parent().unwrap_or_else(|| Path::new("/"))).uri();
+        let base = format!("{}/", base.trim_end_matches('/'));
+        self.expect_preview(&base);
+        self.widgets.preview.load_html(&html, Some(&base));
     }
 
     /// Теги, ссылки и граф текущего файла. Один вызов на переход или паузу в наборе.
@@ -3341,6 +3366,18 @@ impl Ctx {
         self.refresh_tag_chips();
         self.refresh_backlinks();
         self.relayout_graph();
+    }
+
+    fn expect_preview(&self, uri: &str) {
+        self.state.borrow_mut().preview_expect = Some(strip_fragment(uri).to_string());
+    }
+
+    /// Переход без клика допустим: это страница, которую загрузило приложение,
+    /// или встроенный просмотрщик PDF.
+    fn preview_expects(&self, uri: &str) -> bool {
+        let uri = strip_fragment(uri);
+        uri.starts_with("webkit-pdfjs-viewer:")
+            || self.state.borrow().preview_expect.as_deref() == Some(uri)
     }
 
     fn arm_preview(&self, javascript: bool) {
@@ -3357,6 +3394,7 @@ impl Ctx {
 
     fn blank_preview(&self) {
         self.arm_preview(false);
+        self.expect_preview("about:blank");
         self.widgets.preview.load_html("<p></p>", None);
     }
 
@@ -3938,7 +3976,14 @@ impl Ctx {
                         if truncated {
                             ctx.set_status("Индекс обрезан: слишком много Markdown-файлов");
                         } else {
-                            ctx.set_status("Индекс пространства готов");
+                            if text_workspace::sandbox::disabled() {
+                                ctx.set_status(
+                                    "Индекс пространства готов. Песочница предпросмотра выключена: \
+                                     bwrap здесь не работает (поставьте пакет: install_ubuntu.sh --system)",
+                                );
+                            } else {
+                                ctx.set_status("Индекс пространства готов");
+                            }
                         }
                     }
                     glib::ControlFlow::Break
@@ -4698,4 +4743,23 @@ impl Ctx {
             self.set_status(&format!("Не удалось сохранить сессию: {error}"));
         }
     }
+}
+
+/// Адрес без `#фрагмента`.
+fn strip_fragment(uri: &str) -> &str {
+    uri.split_once('#').map_or(uri, |(base, _)| base)
+}
+
+/// WebView предпросмотра без доступа к сети и без постоянного хранилища.
+///
+/// Чужая заметка, HTML или SVG могли тянуть картинки, стили и шрифты с
+/// сервера автора (раскрывая IP и факт прочтения): фильтр по строке
+/// `src="http` обходится десятком способов. Здесь весь сетевой трафик
+/// WebKit уходит в прокси на закрытый порт и не доходит никуда, а
+/// cookie и кэш живут только в памяти. Локальные файлы (file:) не затронуты.
+fn offline_web_view() -> webkit6::WebView {
+    let session = webkit6::NetworkSession::new_ephemeral();
+    let nowhere = webkit6::NetworkProxySettings::new(Some("http://127.0.0.1:9"), &[]);
+    session.set_proxy_settings(webkit6::NetworkProxyMode::Custom, Some(&nowhere));
+    webkit6::WebView::builder().network_session(&session).build()
 }
