@@ -213,6 +213,8 @@ enum Step {
     TableLeave(std::path::PathBuf),
     LinkEdit(std::path::PathBuf, u8),
     Action(String),
+    Resize(i32),
+    Drag(i32, i32),
     Quit,
 }
 
@@ -236,6 +238,20 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(path, 0));
             steps.push(Step::Scroll);
             steps.push(Step::Report("scroll".to_string()));
+        }
+    }
+    if let Ok(widths) = std::env::var("VERST_BENCH_RESIZE") {
+        for item in widths.split(',') {
+            let item = item.trim();
+            // drag:<ширина навигации>:<ширина блока справа> — как перетаскивание.
+            if let Some(rest) = item.strip_prefix("drag:") {
+                let mut parts = rest.split(':').filter_map(|p| p.parse().ok());
+                if let (Some(nav), Some(info)) = (parts.next(), parts.next()) {
+                    steps.push(Step::Drag(nav, info));
+                }
+            } else if let Ok(w) = item.parse() {
+                steps.push(Step::Resize(w));
+            }
         }
     }
     if let Ok(actions) = std::env::var("VERST_BENCH_ACTIONS") {
@@ -358,6 +374,47 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             take_totals();
             reset_stall();
             scroll_stress(ctx, steps, 0, 0);
+        }
+        Step::Drag(nav, info) => {
+            // Как перетаскивание разделителя мышью: без dock_adjust.
+            ctx.widgets.main_paned.set_position(nav);
+            let right = ctx.widgets.right_paned.clone();
+            right.set_position(right.width() - info);
+            glib::timeout_add_local_once(Duration::from_millis(700), move || {
+                let (saved_nav, saved_info) = {
+                    let session = &ctx.state.borrow().session;
+                    (session.nav_width, session.info_width)
+                };
+                eprintln!(
+                    "PROF drag to nav {nav} info {info}: nav {} | info {} | saved nav {saved_nav} info {saved_info}",
+                    ctx.widgets.main_paned.position(),
+                    ctx.widgets.right_paned.width() - ctx.widgets.right_paned.position()
+                );
+                run_steps(ctx, steps);
+            });
+        }
+        Step::Resize(width) => {
+            let window = ctx.widgets.window.clone();
+            let height = window.height().max(600);
+            window.set_default_size(width, height);
+            glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                let main = &ctx.widgets.main_paned;
+                let right = &ctx.widgets.right_paned;
+                let (saved_nav, saved_info) = {
+                    let session = &ctx.state.borrow().session;
+                    (session.nav_width, session.info_width)
+                };
+                eprintln!(
+                    "PROF resize want {width}: window {} | nav {} | center {} | info {} | saved nav {} info {}",
+                    ctx.widgets.window.width(),
+                    main.position(),
+                    right.position(),
+                    right.width() - right.position(),
+                    saved_nav,
+                    saved_info
+                );
+                run_steps(ctx, steps);
+            });
         }
         Step::Action(name) => {
             let before = ctx.focused_path();
