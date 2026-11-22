@@ -231,6 +231,11 @@ enum Step {
     SplitSame(std::path::PathBuf),
     /// Снимок окна через 1,5 с (страница WebKit успевает загрузиться).
     Shot(String),
+    /// Фокус уходит в поле поиска и возвращается в редактор (как Esc из
+    /// ячейки или закрытие всплывающего окна).
+    FocusBounce,
+    /// Выделить весь текст и прокрутить редактор на 30 шагов.
+    SelectScroll(u32),
     Quit,
 }
 
@@ -329,6 +334,18 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[1].clone(), 0));
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
+        }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_SELECT_SCROLL") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::SelectScroll(30));
+        steps.push(Step::Report("select_scroll".to_string()));
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_FOCUS") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        for _ in 0..3 {
+            steps.push(Step::FocusBounce);
+            steps.push(Step::Report("focus_bounce".to_string()));
         }
     }
     if let Some(pair) = std::env::var_os("VERST_BENCH_SPLIT_OTHER") {
@@ -750,6 +767,36 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     );
                     run_steps(ctx, steps);
                 });
+            });
+        }
+        Step::SelectScroll(left) => {
+            let view = ctx.focused_view();
+            if left == 30 {
+                take_totals();
+                reset_stall();
+                let buffer = view.buffer();
+                buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+            }
+            if left == 0 {
+                run_steps(ctx, steps);
+                return;
+            }
+            if let Some(adj) = view.vadjustment() {
+                adj.set_value(adj.value() + 400.0);
+            }
+            glib::timeout_add_local_once(Duration::from_millis(30), move || {
+                let mut steps = steps;
+                steps.push(Step::SelectScroll(left - 1));
+                run_steps(ctx, steps);
+            });
+        }
+        Step::FocusBounce => {
+            take_totals();
+            reset_stall();
+            ctx.widgets.search_entry.grab_focus();
+            glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                ctx.focused_view().grab_focus();
+                run_steps(ctx, steps);
             });
         }
         Step::Shot(name) => {
