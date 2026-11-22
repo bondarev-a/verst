@@ -1019,7 +1019,16 @@ fn existing_file(path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Строка раздела в другом файле, для ссылки `файл.md#раздел` в предпросмотре.
+///
+/// Раньше целевой файл читался и разбирался заново при каждом построении
+/// предпросмотра, для каждой такой ссылки. Теперь ответы помнятся, пока у
+/// файла те же время изменения и размер.
 fn heading_line(path: &Path, fragment: &str) -> Option<usize> {
+    use std::sync::{Mutex, OnceLock};
+    type Key = (PathBuf, String);
+    type Seen = (std::time::SystemTime, u64, Option<usize>);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Seen>>> = OnceLock::new();
     if !has_markdown_ext(path) {
         return None;
     }
@@ -1027,8 +1036,23 @@ fn heading_line(path: &Path, fragment: &str) -> Option<usize> {
     if meta.len() > 1_048_576 {
         return None;
     }
+    let modified = meta.modified().ok()?;
+    let key = (path.to_path_buf(), fragment.to_string());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((when, len, line)) = cache.lock().ok()?.get(&key) {
+        if *when == modified && *len == meta.len() {
+            return *line;
+        }
+    }
     let text = std::fs::read_to_string(path).ok()?;
-    fragment_line(&text, fragment)
+    let line = fragment_line(&text, fragment);
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert(key, (modified, meta.len(), line));
+    }
+    line
 }
 
 /// Строка раздела `#Заголовок` или блока `#^метка` в тексте заметки.
