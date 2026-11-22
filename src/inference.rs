@@ -200,8 +200,12 @@ pub enum AskFail {
     ProviderOff,
     NoAddress,
     NoModel,
-    NoKey { env: String },
-    TooLong { limit: usize },
+    NoKey {
+        env: String,
+    },
+    TooLong {
+        limit: usize,
+    },
     /// Ключ ушёл бы по сети открытым текстом.
     Insecure,
 }
@@ -279,7 +283,9 @@ fn transport_is_safe(base: &str) -> bool {
     host == "localhost"
         || host.ends_with(".localhost")
         || host == "::1"
-        || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 pub fn request_body(

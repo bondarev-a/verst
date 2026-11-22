@@ -271,6 +271,9 @@ pub(super) struct State {
     preview_js: bool,
     /// Флаг остановки текущего поиска по пространству.
     search_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Строка, к которой прокрутить предпросмотр, когда страница загрузится
+    /// (переход по ссылке на раздел в режиме «Просмотр»).
+    preview_jump: Option<u32>,
     side_tick: u64,
     /// Растёт, когда меняется то, от чего зависят ссылки: индекс, граф
     /// чужого пина, активный пин. Кеши ссылок с другим значением устарели.
@@ -1186,6 +1189,7 @@ impl Ctx {
                 preview_expect: None,
                 preview_js: false,
                 search_stop: None,
+                preview_jump: None,
                 side_tick: 0,
                 links_gen: 0,
             })),
@@ -1878,6 +1882,16 @@ impl Ctx {
         });
         self.widgets.find_entry.add_controller(find_keys);
 
+        let ctx = self.clone();
+        self.widgets.preview.connect_load_changed(move |_, event| {
+            if event != webkit6::LoadEvent::Finished {
+                return;
+            }
+            let jump = ctx.state.borrow_mut().preview_jump.take();
+            if let Some(line) = jump {
+                ctx.scroll_preview_to_line(line, 0);
+            }
+        });
         let ctx = self.clone();
         self.widgets
             .preview
@@ -2859,6 +2873,20 @@ impl Ctx {
             });
             done(line);
         });
+    }
+
+    /// Переход к строке, видимый и в режиме «Просмотр». Раньше переход по
+    /// ссылке на раздел ставил курсор только в скрытый редактор, и страница
+    /// предпросмотра оставалась вверху.
+    pub(super) fn reveal_line_in_preview(&self, line: u32, page_ready: bool) {
+        if !self.preview_page_shown() {
+            return;
+        }
+        if page_ready {
+            self.scroll_preview_to_line(line, 0);
+        } else {
+            self.state.borrow_mut().preview_jump = Some(line);
+        }
     }
 
     fn scroll_preview_to_line(&self, line: u32, attempt: u8) {

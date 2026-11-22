@@ -88,6 +88,7 @@ impl Ctx {
         } else if let Some(line) = line {
             self.jump_to_line(line as usize);
             self.stash_pane_caret(self.focused_index());
+            self.reveal_line_in_preview(line, true);
         }
         self.update_nav_buttons();
     }
@@ -392,6 +393,8 @@ impl Ctx {
         if let Some(line) = jump {
             self.jump_to_line(line as usize);
             self.stash_pane_caret(pane);
+            // Страница нового файла ещё грузится: прокрутить после загрузки.
+            self.reveal_line_in_preview(line, false);
             return;
         }
         self.reveal_pane_caret(pane, path);

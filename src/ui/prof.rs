@@ -255,6 +255,9 @@ enum Step {
     WikiJump(String),
     /// Буфер обмена в ячейке: копировать выделение, вставить две строки.
     CellClipboard,
+    /// В режиме «Просмотр» перейти по ссылке на строку и доложить, какая
+    /// строка оказалась на трети высоты окна и сколько прокручено.
+    PreviewJump(std::path::PathBuf, u32),
     Quit,
 }
 
@@ -356,6 +359,15 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[1].clone(), 0));
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
+        }
+    }
+    if let Ok(list) = std::env::var("VERST_BENCH_PREVIEW_JUMP") {
+        for item in list.split(';').filter(|i| !i.is_empty()) {
+            if let Some((path, line)) = item.rsplit_once('@') {
+                if let Ok(line) = line.parse() {
+                    steps.push(Step::PreviewJump(std::path::PathBuf::from(path), line));
+                }
+            }
         }
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_CELL_CLIP") {
@@ -858,6 +870,26 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                         diff
                     );
                     run_steps(ctx, steps);
+                });
+            });
+        }
+        Step::PreviewJump(path, line) => {
+            ctx.go(path.clone(), Some(line));
+            glib::timeout_add_local_once(Duration::from_millis(2000), move || {
+                let script =
+                    "(function(){var s=document.scrollingElement||document.documentElement;\
+                    return s.scrollTop+'/'+(s.scrollHeight-window.innerHeight);})()";
+                let ctx2 = ctx.clone();
+                ctx.read_preview_anchor(move |anchor| {
+                    let ctx3 = ctx2.clone();
+                    ctx3.eval_preview(script, move |value| {
+                        let scroll = value.map(|v| v.to_str().to_string()).unwrap_or_default();
+                        eprintln!(
+                            "PROF preview_jump {}@{line}: строка на трети окна {anchor:?}, прокрутка {scroll}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                        run_steps(ctx2, steps);
+                    });
                 });
             });
         }

@@ -423,7 +423,12 @@ pub fn list_text_files(pin: &Path) -> Vec<PathBuf> {
 }
 
 pub fn search_pin(pin: &Path, query: &str, limit: usize) -> Vec<SearchHit> {
-    search_pin_until(pin, query, limit, &std::sync::atomic::AtomicBool::new(false))
+    search_pin_until(
+        pin,
+        query,
+        limit,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
 }
 
 /// Поиск, который бросается, как только `stop` станет true: новый набор в
