@@ -236,6 +236,9 @@ enum Step {
     FocusBounce,
     /// Выделить весь текст и прокрутить редактор на 30 шагов.
     SelectScroll(u32),
+    /// Вставить несколько строк разом (как Ctrl+V) и проверить оформление
+    /// вставленных строк вне строки курсора.
+    PasteCheck,
     Quit,
 }
 
@@ -335,6 +338,10 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
         }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_PASTE") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::PasteCheck);
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_SELECT_SCROLL") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -767,6 +774,56 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     );
                     run_steps(ctx, steps);
                 });
+            });
+        }
+        Step::PasteCheck => {
+            let buffer = ctx.focused_view().buffer();
+            let mut at = buffer.iter_at_line(1).unwrap_or_else(|| buffer.start_iter());
+            buffer.place_cursor(&at);
+            buffer.begin_user_action();
+            buffer.insert(
+                &mut at,
+                "\n# Вставленный заголовок\n\nтекст **вставленный жирный** конец\n\nпоследняя строка вставки\n",
+            );
+            buffer.end_user_action();
+            glib::timeout_add_local_once(Duration::from_millis(1200), move || {
+                let report = |needle: &str| -> String {
+                    let mut line = 0;
+                    while line < buffer.line_count() {
+                        let Some(start) = buffer.iter_at_line(line) else { break };
+                        let mut end = start;
+                        end.forward_to_line_end();
+                        let text = buffer.text(&start, &end, true);
+                        if let Some(col) = text.find(needle) {
+                            let chars = text[..col].chars().count() as i32;
+                            let mut iter = start;
+                            iter.forward_chars(chars + 1);
+                            let names: Vec<String> = iter
+                                .tags()
+                                .iter()
+                                .filter_map(|t| t.name().map(|n| n.to_string()))
+                                .filter(|n| n.starts_with("tw-"))
+                                .collect();
+                            let mut first = start;
+                            let hidden_first = first
+                                .tags()
+                                .iter()
+                                .any(|t| t.name().as_deref() == Some("tw-hide"));
+                            first.forward_char();
+                            return format!("line {line} tags {names:?} first_hidden {hidden_first}");
+                        }
+                        line += 1;
+                    }
+                    "не найдено".into()
+                };
+                let cursor = buffer.iter_at_mark(&buffer.get_insert()).line();
+                eprintln!(
+                    "PROF paste: cursor line {cursor}; heading: {}; bold: {}; old heading: {}",
+                    report("Вставленный заголовок"),
+                    report("вставленный жирный"),
+                    report("Раздел 1:")
+                );
+                run_steps(ctx, steps);
             });
         }
         Step::SelectScroll(left) => {

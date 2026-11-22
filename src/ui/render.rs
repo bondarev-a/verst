@@ -55,6 +55,9 @@ pub(super) struct RenderState {
     spans: Vec<MarkSpan>,
     line_starts: Vec<usize>,
     text_len: usize,
+    /// По строке: хеш текста и хеш её разметки. По ним быстрая перерисовка
+    /// находит строки, чьё оформление изменилось, кроме строки курсора.
+    line_sigs: Vec<(u64, u64)>,
     cursor_line: Option<i32>,
     painted: bool,
     /// Файл, для которого посчитаны spans, таблицы и картинки.
@@ -461,6 +464,7 @@ impl Ctx {
             let mut state = self.state.borrow_mut();
             state.render.spans.clear();
             state.render.line_starts.clear();
+            state.render.line_sigs.clear();
             state.render.table_bodies.clear();
             state.render.image_keys.clear();
             state.render.painted = false;
@@ -503,6 +507,7 @@ impl Ctx {
             if keep_tables.is_empty() && keep_images.is_empty() {
                 state.render.spans.clear();
                 state.render.line_starts.clear();
+                state.render.line_sigs.clear();
                 state.render.table_bodies.clear();
                 state.render.image_keys.clear();
                 state.render.painted = false;
@@ -1791,15 +1796,33 @@ impl Ctx {
                     }
                 }
             }
+            let old_sigs = self.state.borrow().render.line_sigs.clone();
             self.store_paint(path, &text, spans, cursor_line, bodies, image_keys);
-            let (spans, line_starts, text_len) = {
+            let (spans, line_starts, text_len, new_sigs) = {
                 let render = &self.state.borrow().render;
                 (
                     render.spans.clone(),
                     render.line_starts.clone(),
                     render.text_len,
+                    render.line_sigs.clone(),
                 )
             };
+            // Правка могла изменить оформление не только строки курсора:
+            // вставка нескольких строк, отмена, открытие блока кода ```.
+            // Раньше такие строки оставались со старыми тегами.
+            let changed = changed_lines(&old_sigs, &new_sigs);
+            if changed.len() > 400 {
+                paint_tags(buffer, &text, &spans, cursor_line, &md_tables);
+            } else {
+                for line in changed {
+                    if line != cursor_line
+                        && Some(line) != prev_line
+                        && !line_in_live_table(&self.state.borrow().render, line)
+                    {
+                        retag_cursor_line(buffer, &spans, &line_starts, text_len, line, false);
+                    }
+                }
+            }
             if let Some(prev) = prev_line {
                 if prev != cursor_line && !line_in_live_table(&self.state.borrow().render, prev) {
                     retag_cursor_line(buffer, &spans, &line_starts, text_len, prev, false);
@@ -1959,9 +1982,11 @@ impl Ctx {
         image_keys: Vec<String>,
     ) {
     let _prof = crate::ui::prof::span("store_paint");
+        let sigs = line_signatures(text, &spans);
         let mut state = self.state.borrow_mut();
         state.render.line_starts = line_starts_of(text);
         state.render.text_len = text.len();
+        state.render.line_sigs = sigs;
         state.render.spans = spans;
         state.render.cursor_line = Some(cursor_line);
         state.render.table_bodies = bodies;
@@ -2746,6 +2771,70 @@ fn file_byte_at_iter(buffer: &gtk4::TextBuffer, iter: &gtk4::TextIter) -> usize 
     buffer.text(&start, iter, true).len()
 }
 
+/// Для каждой строки: хеш её текста и хеш разметки на ней (вид и границы
+/// кусков относительно начала строки).
+fn line_signatures(text: &str, spans: &[MarkSpan]) -> Vec<(u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    let starts = line_starts_of(text);
+    let line_end = |line: usize| starts.get(line + 1).copied().unwrap_or(text.len());
+    let mut marks: Vec<std::collections::hash_map::DefaultHasher> =
+        (0..starts.len()).map(|_| Default::default()).collect();
+    for span in spans {
+        let mut line = starts.partition_point(|at| *at <= span.start).saturating_sub(1);
+        while line < starts.len() && starts[line] < span.end.max(span.start + 1) {
+            let begin = starts[line];
+            let hasher = &mut marks[line];
+            std::mem::discriminant(&span.kind).hash(hasher);
+            (span.start.max(begin) - begin).hash(hasher);
+            (span.end.min(line_end(line)) - begin).hash(hasher);
+            line += 1;
+        }
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(line, start)| {
+            let mut content = std::collections::hash_map::DefaultHasher::new();
+            text[*start..line_end(line)].hash(&mut content);
+            (content.finish(), marks[line].finish())
+        })
+        .collect()
+}
+
+/// Строки нового текста, которые надо перекрасить: изменённые правкой
+/// (между общими началом и концом) и те, у которых при том же тексте
+/// поменялась разметка.
+fn changed_lines(old: &[(u64, u64)], new: &[(u64, u64)]) -> Vec<i32> {
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(a, b)| a.0 == b.0)
+        .count();
+    let room = old.len().min(new.len()) - prefix;
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a.0 == b.0)
+        .count();
+    let mut out = Vec::new();
+    for line in 0..prefix {
+        if old[line].1 != new[line].1 {
+            out.push(line as i32);
+        }
+    }
+    for line in prefix..new.len() - suffix {
+        out.push(line as i32);
+    }
+    for k in 1..=suffix {
+        if old[old.len() - k].1 != new[new.len() - k].1 {
+            out.push((new.len() - k) as i32);
+        }
+    }
+    out
+}
+
 fn line_starts_of(text: &str) -> Vec<usize> {
     let mut starts = vec![0];
     for (index, byte) in text.bytes().enumerate() {
@@ -3159,6 +3248,21 @@ mod tests {
     fn apply(old: &str, new: &str) -> String {
         let (from, old_to, new_to) = changed_span(old, new);
         format!("{}{}{}", &old[..from], &new[from..new_to], &old[old_to..])
+    }
+
+    #[test]
+    fn changed_lines_finds_pasted_and_restyled_lines() {
+        use super::{changed_lines, line_signatures};
+        use text_workspace::markup::mark_spans;
+        let sig = |t: &str| line_signatures(t, &mark_spans(t));
+        let before = "абзац\n\nвторой\nтретий\n";
+        let pasted = "абзац\n# Заголовок\n**жирный**\n\nвторой\nтретий\n";
+        assert_eq!(changed_lines(&sig(before), &sig(pasted)), vec![1, 2]);
+        // Открытая ``` меняет оформление следующих строк при том же тексте.
+        let fenced = "```\nабзац\n\nвторой\nтретий\n";
+        let lines = changed_lines(&sig(before), &sig(fenced));
+        assert!(lines.contains(&0) && lines.contains(&1) && lines.contains(&3), "{lines:?}");
+        assert!(changed_lines(&sig(before), &sig(before)).is_empty());
     }
 
     #[test]
