@@ -4,14 +4,22 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::markdown;
 
-const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", ".cache"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".cache",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".obsidian",
+    ".trash",
+];
 const MAX_MD_FILES: usize = 20_000;
 const MAX_SEARCH_BYTES: u64 = 512 * 1024;
-const BINARY_EXT: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "o",
-    "a", "so", "dylib", "wasm", "mp3", "mp4", "ttf", "otf", "woff", "woff2", "class", "jar",
-    "sqlite", "db",
-];
+/// Больше редактор не открывает; такой файл и в индекс ссылок не читается.
+const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct LinkIndex {
@@ -32,24 +40,17 @@ pub struct SearchHit {
 
 impl LinkIndex {
     pub fn incoming_of(&self, path: &Path) -> &[PathBuf] {
-        self.outgoing_slice(&self.incoming, path)
+        Self::edges_of(&self.incoming, path)
     }
 
-    /// Входящие из графа ссылок. Ключ в индексе нормализован, открытый путь может отличаться.
+    /// Входящие из графа ссылок. Ключ в индексе нормализован, открытый путь
+    /// может отличаться: сверку берёт на себя `incoming_of`.
     pub fn incoming_edges(&self, path: &Path) -> Vec<PathBuf> {
-        let direct = self.incoming_of(path);
-        if !direct.is_empty() {
-            return direct.to_vec();
-        }
-        let normalized = markdown::normalize(path.to_path_buf());
-        if normalized.as_path() != path {
-            return self.incoming_of(&normalized).to_vec();
-        }
-        Vec::new()
+        self.incoming_of(path).to_vec()
     }
 
     pub fn outgoing_of(&self, path: &Path) -> &[PathBuf] {
-        self.outgoing_slice(&self.outgoing, path)
+        Self::edges_of(&self.outgoing, path)
     }
 
     pub fn files_with_tag(&self, tag: &str) -> &[PathBuf] {
@@ -115,9 +116,10 @@ impl LinkIndex {
             if old.iter().any(|item| item == target) {
                 continue;
             }
+            // Входящие держим по порядку путей, как после полной сборки.
             let files = self.incoming.entry(target.clone()).or_default();
-            if !files.iter().any(|item| item == path) {
-                files.push(path.to_path_buf());
+            if let Err(at) = files.binary_search_by(|item| item.as_path().cmp(path)) {
+                files.insert(at, path.to_path_buf());
             }
         }
         if targets.is_empty() {
@@ -127,11 +129,8 @@ impl LinkIndex {
         }
     }
 
-    fn outgoing_slice<'a>(
-        &'a self,
-        map: &'a HashMap<PathBuf, Vec<PathBuf>>,
-        path: &Path,
-    ) -> &'a [PathBuf] {
+    /// Список по пути как есть, иначе по нормализованному (`a/./b.md`).
+    fn edges_of<'a>(map: &'a HashMap<PathBuf, Vec<PathBuf>>, path: &Path) -> &'a [PathBuf] {
         if let Some(found) = map.get(path) {
             return found;
         }
@@ -154,11 +153,19 @@ pub fn build_index(pin: &Path) -> LinkIndex {
     let mut incoming: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     let mut file_tags: HashMap<PathBuf, Vec<String>> = HashMap::new();
     let mut tag_files: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    // Таблица имён для вики-ссылок строится один раз на весь проход.
+    let lookup = markdown::WikiLookup::new(&files);
+    // Файлы отсортированы и обходятся по порядку, поэтому списки входящих
+    // тоже получаются отсортированными; set_file_outgoing держит тот же порядок.
     for file in &files {
+        if fs::metadata(file).map_or(true, |meta| meta.len() > MAX_INDEX_BYTES) {
+            continue;
+        }
         let Ok(text) = fs::read_to_string(file) else {
             continue;
         };
-        let targets = outgoing_targets(&text, file, pin, &files);
+        let text = markdown::strip_bom(&text);
+        let targets = outgoing_with(text, file, pin, &lookup);
         for target in &targets {
             incoming
                 .entry(target.clone())
@@ -168,7 +175,7 @@ pub fn build_index(pin: &Path) -> LinkIndex {
         if !targets.is_empty() {
             outgoing.insert(file.clone(), targets);
         }
-        let tags = markdown::extract_tags(&text);
+        let tags = markdown::extract_tags(text);
         if !tags.is_empty() {
             for tag in &tags {
                 tag_files.entry(tag.clone()).or_default().push(file.clone());
@@ -269,10 +276,19 @@ pub fn outgoing_targets(
     scope: &Path,
     markdown_files: &[PathBuf],
 ) -> Vec<PathBuf> {
+    outgoing_with(text, from, scope, &markdown::WikiLookup::new(markdown_files))
+}
+
+fn outgoing_with(
+    text: &str,
+    from: &Path,
+    scope: &Path,
+    lookup: &markdown::WikiLookup,
+) -> Vec<PathBuf> {
     let from_norm = markdown::normalize(from.to_path_buf());
     let mut targets = Vec::new();
     for link in markdown::extract_links(text) {
-        let Some(path) = resolve_outgoing(&link, &from_norm, scope, markdown_files) else {
+        let Some(path) = resolve_outgoing(&link, &from_norm, scope, lookup) else {
             continue;
         };
         if path == from_norm
@@ -291,7 +307,7 @@ fn resolve_outgoing(
     link: &markdown::RawLink,
     from: &Path,
     scope: &Path,
-    files: &[PathBuf],
+    lookup: &markdown::WikiLookup,
 ) -> Option<PathBuf> {
     match link.kind {
         markdown::LinkKind::Markdown => {
@@ -299,7 +315,7 @@ fn resolve_outgoing(
             locate_file(&path)
         }
         markdown::LinkKind::Wiki => {
-            let matches = markdown::resolve_wiki(&link.target, scope, files);
+            let matches = lookup.resolve(&link.target, scope);
             if matches.len() > 1 {
                 return None;
             }
@@ -392,23 +408,13 @@ pub fn list_text_files(pin: &Path) -> Vec<PathBuf> {
                     continue;
                 }
                 stack.push(path);
-            } else if file_type.is_file() && !is_binary_name(&path) {
+            } else if file_type.is_file() && !crate::kind::is_binary(&path) {
                 files.push(path);
             }
         }
     }
     files.sort();
     files
-}
-
-fn is_binary_name(path: &Path) -> bool {
-    if crate::kind::is_view_only(path) {
-        return true;
-    }
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .is_some_and(|ext| BINARY_EXT.contains(&ext.as_str()))
 }
 
 pub fn search_pin(pin: &Path, query: &str, limit: usize) -> Vec<SearchHit> {
@@ -488,17 +494,7 @@ fn searchable(path: &Path) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
-    if !meta.is_file() || meta.len() > MAX_SEARCH_BYTES {
-        return false;
-    }
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-    {
-        Some(ext) if BINARY_EXT.iter().any(|item| *item == ext) => false,
-        _ => true,
-    }
+    meta.is_file() && meta.len() <= MAX_SEARCH_BYTES && !crate::kind::is_binary(path)
 }
 
 #[cfg(test)]
@@ -541,8 +537,13 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("c.md"), "тоже #общая\n").unwrap();
+        fs::write(root.join("d.md"), "\u{feff}---\ntags: [общая]\n---\n[[c]]\n").unwrap();
         let index = build_index(&root);
-        assert_eq!(index.files_with_tag("общая").len(), 2);
+        assert_eq!(index.files_with_tag("общая").len(), 3);
+        assert!(index
+            .outgoing_of(&root.join("d.md"))
+            .iter()
+            .any(|path| path.ends_with("c.md")));
         assert_eq!(index.files_with_tag("уникальная").len(), 1);
         assert!(index.files_with_tag("заголовок").is_empty());
         let _ = fs::remove_dir_all(&root);
@@ -659,6 +660,59 @@ mod tests {
         let wiki_files = markdown_in(&models);
         let wiki_targets = outgoing_targets(&wiki, &models.join("wiki.md"), &models, &wiki_files);
         assert!(wiki_targets.iter().any(|path| path.ends_with("todo.txt")));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn incremental_incoming_stays_sorted_like_full_build() {
+        let root =
+            std::env::temp_dir().join(format!("text_workspace_incoming_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("цель.md"), "пусто\n").unwrap();
+        fs::write(root.join("яблоко.md"), "[[цель]]\n").unwrap();
+        fs::write(root.join("борщ.md"), "[[цель]]\n").unwrap();
+        fs::write(root.join("арбуз.md"), "текст\n").unwrap();
+        let mut index = build_index(&root);
+        let target = root.join("цель.md");
+        assert_eq!(
+            index.incoming_of(&target),
+            [root.join("борщ.md"), root.join("яблоко.md")]
+        );
+        let text = "[[Цель]]\n";
+        let from = root.join("арбуз.md");
+        let targets = outgoing_targets(text, &from, &root, &index.files);
+        index.set_file_outgoing(&from, targets);
+        fs::write(&from, text).unwrap();
+        let full = build_index(&root);
+        assert_eq!(index.incoming_of(&target), full.incoming_of(&target));
+        assert_eq!(
+            index.incoming_edges(&root.join(".").join("цель.md")),
+            [root.join("арбуз.md"), root.join("борщ.md"), root.join("яблоко.md")]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_skips_tool_dirs_and_huge_files() {
+        let root =
+            std::env::temp_dir().join(format!("text_workspace_skip_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for dir in [".venv", "venv", "__pycache__", ".obsidian", ".trash", "заметки"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join("внутри.md"), "[[цель]]\n").unwrap();
+        }
+        fs::write(root.join("цель.md"), "пусто\n").unwrap();
+        let mut huge = String::from("[[цель]] #большой\n");
+        huge.push_str(&"а".repeat((MAX_INDEX_BYTES / 2) as usize + 1));
+        fs::write(root.join("огромный.md"), huge).unwrap();
+        let index = build_index(&root);
+        assert_eq!(index.files.len(), 3);
+        assert_eq!(
+            index.incoming_of(&root.join("цель.md")),
+            [root.join("заметки").join("внутри.md")]
+        );
+        assert!(index.files_with_tag("большой").is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

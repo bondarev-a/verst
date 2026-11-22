@@ -1,4 +1,5 @@
-use std::collections::BTreeSet;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::index::LinkIndex;
@@ -89,38 +90,38 @@ pub fn layout(index: &LinkIndex, current: Option<&Path>, width: f64, height: f64
     GraphLayout { nodes, edges }
 }
 
+/// Текущий файл всегда первый, дальше до `MAX_NODES - 1` соседей: больше
+/// связей — раньше, при равенстве по пути. Без соседей — самые связанные
+/// файлы пространства. Порядок не зависит от обхода HashMap, так что граф
+/// не перескакивает между переиндексациями.
 fn select_nodes(index: &LinkIndex, current: Option<&Path>) -> Vec<PathBuf> {
-    let mut chosen = BTreeSet::new();
+    let mut degree: HashMap<&Path, usize> = HashMap::new();
+    for (from, targets) in &index.outgoing {
+        *degree.entry(from.as_path()).or_default() += targets.len();
+        for target in targets {
+            *degree.entry(target.as_path()).or_default() += 1;
+        }
+    }
+    let current = current.filter(|path| index.files.iter().any(|file| file == path));
+    let mut chosen = Vec::new();
+    let mut candidates: BTreeSet<&Path> = BTreeSet::new();
     if let Some(path) = current {
-        if index.files.iter().any(|file| file == path) {
-            chosen.insert(path.to_path_buf());
-            for item in index.outgoing_of(path) {
-                chosen.insert(item.clone());
-            }
-            for item in index.incoming_of(path) {
-                chosen.insert(item.clone());
-            }
-        }
+        chosen.push(path.to_path_buf());
+        candidates.extend(index.outgoing_of(path).iter().map(PathBuf::as_path));
+        candidates.extend(index.incoming_of(path).iter().map(PathBuf::as_path));
     }
-    if chosen.len() <= 1 {
-        for (from, targets) in &index.outgoing {
-            chosen.insert(from.clone());
-            for target in targets {
-                chosen.insert(target.clone());
-            }
-            if chosen.len() >= MAX_NODES {
-                break;
-            }
-        }
+    if candidates.iter().all(|item| Some(*item) == current) {
+        candidates.extend(degree.keys().copied());
     }
-    let mut paths: Vec<PathBuf> = chosen.into_iter().take(MAX_NODES).collect();
     if let Some(path) = current {
-        if let Some(pos) = paths.iter().position(|item| item == path) {
-            let current_path = paths.remove(pos);
-            paths.insert(0, current_path);
-        }
+        candidates.remove(path);
     }
-    paths
+    let mut ranked: Vec<&Path> = candidates.into_iter().collect();
+    // Сортировка устойчивая, а BTreeSet уже по пути: равные идут по алфавиту.
+    ranked.sort_by_key(|path| Reverse(degree.get(path).copied().unwrap_or(0)));
+    let room = MAX_NODES.saturating_sub(chosen.len());
+    chosen.extend(ranked.into_iter().take(room).map(Path::to_path_buf));
+    chosen
 }
 
 fn label_of(path: &Path) -> String {
@@ -159,5 +160,53 @@ mod tests {
         assert!((layout.nodes[0].y - 150.0).abs() < 0.1);
         assert_eq!(layout.edges.len(), 1);
         assert!(layout.hit(200.0, 150.0).unwrap().current);
+    }
+
+    #[test]
+    fn current_file_stays_among_many_neighbours() {
+        let mut index = LinkIndex::default();
+        let current = PathBuf::from("/repo/яблоко.md");
+        let hub = PathBuf::from("/repo/хаб.md");
+        let mut files = vec![current.clone(), hub.clone()];
+        let mut targets = Vec::new();
+        for n in 0..60 {
+            let path = PathBuf::from(format!("/repo/заметка {n:02}.md"));
+            files.push(path.clone());
+            targets.push(path.clone());
+            index.incoming.insert(path, vec![current.clone()]);
+        }
+        targets.push(hub.clone());
+        index.outgoing.insert(hub.clone(), vec![current.clone()]);
+        index.incoming.insert(current.clone(), vec![hub.clone()]);
+        index.outgoing.insert(current.clone(), targets);
+        index.files = files;
+        let first = select_nodes(&index, Some(&current));
+        assert_eq!(first.len(), MAX_NODES);
+        assert_eq!(first[0], current);
+        // У хаба две связи, у остальных по одной: он первый из соседей.
+        assert_eq!(first[1], hub);
+        assert_eq!(first[2], PathBuf::from("/repo/заметка 00.md"));
+        for _ in 0..5 {
+            assert_eq!(select_nodes(&index.clone(), Some(&current)), first);
+        }
+    }
+
+    #[test]
+    fn unlinked_current_file_comes_first_then_busiest() {
+        let mut index = LinkIndex::default();
+        let lonely = PathBuf::from("/repo/я одна.md");
+        let a = PathBuf::from("/repo/а.md");
+        let b = PathBuf::from("/repo/б.md");
+        let c = PathBuf::from("/repo/в.md");
+        let d = PathBuf::from("/repo/г.md");
+        index.files = vec![lonely.clone(), a.clone(), b.clone(), c.clone(), d.clone()];
+        // Связей: б — 3, а и в — по 2, г — 1.
+        index.outgoing.insert(a.clone(), vec![b.clone(), c.clone()]);
+        index.outgoing.insert(c.clone(), vec![b.clone()]);
+        index.outgoing.insert(d.clone(), vec![b.clone()]);
+        let nodes = select_nodes(&index, Some(&lonely));
+        assert_eq!(nodes, vec![lonely, b.clone(), a.clone(), c.clone(), d.clone()]);
+        let nodes = select_nodes(&index, None);
+        assert_eq!(nodes, vec![b, a, c, d]);
     }
 }

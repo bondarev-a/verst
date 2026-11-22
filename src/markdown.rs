@@ -1,3 +1,6 @@
+use std::cell::OnceCell;
+use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use pulldown_cmark::{html, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
@@ -22,10 +25,23 @@ pub struct RawLink {
     pub line: usize,
 }
 
+/// Без метки порядка байтов (U+FEFF) в начале. Её оставляют редакторы
+/// Windows; с ней первая строка `# Заголовок` или `---` не узнаётся.
+/// Сам файл не меняется: метка снимается только при разборе.
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 pub fn headings(source: &str) -> Vec<Heading> {
+    let source = strip_bom(source);
     let mut out = Vec::new();
     let mut in_fence = false;
-    for (line, raw) in source.lines().enumerate() {
+    // Строки шапки YAML пропускаются: `# комментарий` в ней не заголовок.
+    let skip = match split_frontmatter(source) {
+        (Some(front), _) => front.lines().count(),
+        (None, _) => 0,
+    };
+    for (line, raw) in source.lines().enumerate().skip(skip) {
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             in_fence = !in_fence;
@@ -56,6 +72,7 @@ pub fn headings(source: &str) -> Vec<Heading> {
 }
 
 pub fn extract_links(source: &str) -> Vec<RawLink> {
+    let source = strip_bom(source);
     let mut out = Vec::new();
     let mut in_fence = false;
     for (line_index, raw) in source.lines().enumerate() {
@@ -73,40 +90,36 @@ pub fn extract_links(source: &str) -> Vec<RawLink> {
 }
 
 fn scan_line(line: &str, line_index: usize, out: &mut Vec<RawLink>) {
-    let chars: Vec<char> = line.chars().collect();
+    let bytes = line.as_bytes();
     let mut i = 0;
     let mut code = false;
-    while i < chars.len() {
-        if chars[i] == '`' {
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
             code = !code;
             i += 1;
             continue;
         }
-        if code {
+        if code || bytes[i] != b'[' {
             i += 1;
             continue;
         }
-        if chars[i] == '[' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            if let Some(end) = find_seq(&chars, i + 2, &[']', ']']) {
-                let inner: String = chars[i + 2..end].iter().collect();
-                let target = wiki_target(&inner);
-                if !target.is_empty() {
-                    out.push(RawLink {
-                        kind: LinkKind::Wiki,
-                        target,
-                        line: line_index,
-                    });
-                }
-                i = end + 2;
-                continue;
+        if let Some(link) = wiki_at(line, i) {
+            // `[[#Раздел]]` ведёт в тот же файл: в графе это не ребро.
+            if !link.parts.target.is_empty() {
+                out.push(RawLink {
+                    kind: LinkKind::Wiki,
+                    target: link.parts.target.to_string(),
+                    line: line_index,
+                });
             }
+            i = link.end;
+            continue;
         }
-        if chars[i] == '[' && (i == 0 || chars[i - 1] != '!') {
-            if let Some(close) = find_char(&chars, i + 1, ']') {
-                if close + 1 < chars.len() && chars[close + 1] == '(' {
-                    if let Some(url_end) = find_char(&chars, close + 2, ')') {
-                        let target: String = chars[close + 2..url_end].iter().collect();
-                        let target = target.trim().to_string();
+        if i == 0 || bytes[i - 1] != b'!' {
+            if let Some(close) = find_byte(bytes, i + 1, b']') {
+                if bytes.get(close + 1) == Some(&b'(') {
+                    if let Some(url_end) = find_byte(bytes, close + 2, b')') {
+                        let target = line[close + 2..url_end].trim().to_string();
                         if is_local_markdown_target(&target) {
                             out.push(RawLink {
                                 kind: LinkKind::Markdown,
@@ -124,8 +137,88 @@ fn scan_line(line: &str, line_index: usize, out: &mut Vec<RawLink>) {
     }
 }
 
-fn wiki_target(inner: &str) -> String {
-    inner.split('|').next().unwrap_or(inner).trim().to_string()
+/// Части вики-ссылки `[[цель#раздел|подпись]]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WikiParts<'a> {
+    /// Всё до `|`: цель вместе с разделом, как написано.
+    pub link: &'a str,
+    /// Имя заметки или путь. Пусто у `[[#Раздел]]`: это ссылка на текущий файл.
+    pub target: &'a str,
+    /// Раздел после `#`: заголовок или `^блок`.
+    pub fragment: Option<&'a str>,
+    /// Подпись после `|`.
+    pub alias: Option<&'a str>,
+}
+
+/// Вики-ссылка в тексте: смещения в байтах.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WikiLink<'a> {
+    /// Начало `[[`.
+    pub start: usize,
+    /// Байт после `]]`.
+    pub end: usize,
+    /// Начало видимой части: подписи, если она есть, иначе цели.
+    pub shown: usize,
+    pub parts: WikiParts<'a>,
+}
+
+/// Разбор внутренней части `цель#раздел|подпись` по правилам Obsidian.
+/// Общий для предпросмотра, индекса ссылок и разметки редактора.
+/// `None`, если в цели есть скобки или нет ни имени, ни раздела.
+pub fn wiki_parts(inner: &str) -> Option<WikiParts<'_>> {
+    let (link, alias) = match inner.split_once('|') {
+        Some((link, alias)) => (link, Some(alias.trim()).filter(|alias| !alias.is_empty())),
+        None => (inner, None),
+    };
+    if link.contains(['[', ']', '\n']) {
+        return None;
+    }
+    // В таблицах Obsidian пишет `[[цель\|подпись]]`: обратная косая черта
+    // экранирует `|` для таблицы и к имени не относится.
+    let link = link.trim().trim_end_matches('\\').trim_end();
+    let (target, fragment) = match link.split_once('#') {
+        Some((target, fragment)) => (
+            target.trim(),
+            Some(fragment.trim()).filter(|fragment| !fragment.is_empty()),
+        ),
+        None => (link, None),
+    };
+    if target.is_empty() && fragment.is_none() {
+        return None;
+    }
+    Some(WikiParts {
+        link,
+        target,
+        fragment,
+        alias,
+    })
+}
+
+/// Вики-ссылка, которая начинается ровно с `[[` в `text[start..]`.
+/// Ссылка кончается первой `]]` на той же строке; `[` внутри не бывает,
+/// так что `[[a[b]]` — не ссылка ни в одном из разборов.
+pub fn wiki_at(text: &str, start: usize) -> Option<WikiLink<'_>> {
+    let rest = text.get(start..)?;
+    if !rest.starts_with("[[") {
+        return None;
+    }
+    let line = &rest[..rest.find('\n').unwrap_or(rest.len())];
+    let close = line[2..].find("]]")? + 2;
+    let inner = &line[2..close];
+    if inner.contains('[') {
+        return None;
+    }
+    let parts = wiki_parts(inner)?;
+    let shown = match inner.find('|') {
+        Some(bar) if parts.alias.is_some() => start + 2 + bar + 1,
+        _ => start + 2,
+    };
+    Some(WikiLink {
+        start,
+        end: start + close + 2,
+        shown,
+        parts,
+    })
 }
 
 fn is_local_markdown_target(target: &str) -> bool {
@@ -145,20 +238,11 @@ fn is_local_markdown_target(target: &str) -> bool {
     true
 }
 
-fn find_char(chars: &[char], from: usize, needle: char) -> Option<usize> {
-    chars[from..]
+fn find_byte(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
+    bytes
+        .get(from..)?
         .iter()
-        .position(|c| *c == needle)
-        .map(|i| i + from)
-}
-
-fn find_seq(chars: &[char], from: usize, seq: &[char]) -> Option<usize> {
-    if seq.is_empty() || from >= chars.len() {
-        return None;
-    }
-    chars[from..]
-        .windows(seq.len())
-        .position(|w| w == seq)
+        .position(|byte| *byte == needle)
         .map(|i| i + from)
 }
 
@@ -186,27 +270,90 @@ pub fn resolve_markdown(from: &Path, raw: &str) -> Option<PathBuf> {
 }
 
 pub fn resolve_wiki(name: &str, pin: &Path, files: &[PathBuf]) -> Vec<PathBuf> {
-    let name = wiki_target(name);
-    if name.is_empty() {
-        return Vec::new();
-    }
-    if name.contains('/') || name.ends_with(".md") || name.ends_with(".markdown") {
-        let mut relative = PathBuf::from(&name);
-        if relative.extension().is_none() {
-            relative.set_extension("md");
+    WikiLookup::new(files).resolve(name, pin)
+}
+
+/// Поиск файлов по имени из вики-ссылки. Строится один раз на проход
+/// (предпросмотр, индекс), а не перебирает все файлы на каждую ссылку.
+/// Имя сравнивается без учёта регистра, как в Obsidian.
+pub struct WikiLookup<'a> {
+    files: &'a [PathBuf],
+    by_stem: OnceCell<HashMap<String, Vec<usize>>>,
+    by_name: OnceCell<HashMap<String, Vec<usize>>>,
+    by_path: OnceCell<HashMap<String, Vec<usize>>>,
+}
+
+impl<'a> WikiLookup<'a> {
+    pub fn new(files: &'a [PathBuf]) -> Self {
+        Self {
+            files,
+            by_stem: OnceCell::new(),
+            by_name: OnceCell::new(),
+            by_path: OnceCell::new(),
         }
-        let candidate = normalize(pin.join(relative));
-        return files
-            .iter()
-            .filter(|path| *path == &candidate)
-            .cloned()
-            .collect();
     }
-    files
-        .iter()
-        .filter(|path| path.file_stem().and_then(|stem| stem.to_str()) == Some(name.as_str()))
-        .cloned()
-        .collect()
+
+    /// `name` — цель ссылки; раздел и подпись отбрасываются.
+    pub fn resolve(&self, name: &str, pin: &Path) -> Vec<PathBuf> {
+        let Some(parts) = wiki_parts(name) else {
+            return Vec::new();
+        };
+        let target = parts.target;
+        if target.is_empty() {
+            return Vec::new();
+        }
+        let (map, key) = if target.contains('/') {
+            let mut relative = PathBuf::from(target);
+            if relative.extension().is_none() {
+                relative.set_extension("md");
+            }
+            let candidate = normalize(pin.join(relative));
+            let map = self.by_path.get_or_init(|| {
+                self.group(|path| {
+                    Some(normalize(path.to_path_buf()).to_string_lossy().into_owned())
+                })
+            });
+            (map, candidate.to_string_lossy().to_lowercase())
+        } else if has_markdown_ext(Path::new(target)) {
+            let map = self.by_name.get_or_init(|| {
+                self.group(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_string)
+                })
+            });
+            (map, target.to_lowercase())
+        } else {
+            let map = self.by_stem.get_or_init(|| {
+                self.group(|path| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                })
+            });
+            (map, target.to_lowercase())
+        };
+        map.get(&key)
+            .map(|found| found.iter().map(|at| self.files[*at].clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn group(&self, key: impl Fn(&Path) -> Option<String>) -> HashMap<String, Vec<usize>> {
+        let mut map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (at, path) in self.files.iter().enumerate() {
+            if let Some(key) = key(path) {
+                map.entry(key.to_lowercase()).or_default().push(at);
+            }
+        }
+        map
+    }
+}
+
+/// `.md` или `.markdown` в любом регистре.
+pub fn has_markdown_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
 }
 
 pub enum LocalLink {
@@ -224,11 +371,22 @@ pub fn render_html(
     href: &impl Fn(LocalLink) -> String,
     missing_prefix: &str,
 ) -> String {
-    let rewritten = rewrite_wikilinks(source, pin, files, href);
+    let source = strip_bom(source);
+    let rewriter = Rewriter {
+        from,
+        source,
+        pin,
+        lookup: WikiLookup::new(files),
+        href,
+    };
+    let rewritten = rewriter.rewrite(source);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    // Шапка YAML (`---` … `---` в начале файла) — метаданные, а не линия и
+    // заголовок второго уровня. В HTML она не выводится, как в Obsidian.
+    options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     // Номер строки события — двоичным поиском по началам строк. Подсчёт `\n`
     // с начала файла на каждое событие был квадратичным: 200 мс на 200 КБ.
     let newlines: Vec<usize> = rewritten
@@ -250,10 +408,18 @@ pub fn render_html(
             ))));
             seen_line = Some(line);
         }
-        if matches!(event, Event::Start(Tag::CodeBlock(_))) {
+        // Внутри кода и шапки якоря строк не вставляются: в коде они стали бы
+        // текстом, а шапку писатель HTML не выводит, кроме сырого HTML.
+        if matches!(
+            event,
+            Event::Start(Tag::CodeBlock(_)) | Event::Start(Tag::MetadataBlock(_))
+        ) {
             in_code = true;
         }
-        let ends_code = matches!(event, Event::End(TagEnd::CodeBlock));
+        let ends_code = matches!(
+            event,
+            Event::End(TagEnd::CodeBlock) | Event::End(TagEnd::MetadataBlock(_))
+        );
         events.push(event);
         if ends_code {
             in_code = false;
@@ -295,90 +461,139 @@ fn line_at_byte(source: &str, byte: usize) -> usize {
     source[..end].bytes().filter(|byte| *byte == b'\n').count()
 }
 
-fn rewrite_wikilinks(
-    source: &str,
-    pin: Option<&Path>,
-    files: &[PathBuf],
-    href: &impl Fn(LocalLink) -> String,
-) -> String {
-    let (front, body) = split_frontmatter(source);
-    let mut out = String::new();
-    if let Some(front) = front {
-        out.push_str(front);
-    }
-    let mut in_fence = false;
-    for (index, raw) in body.lines().enumerate() {
-        if index > 0 {
-            out.push('\n');
-        }
-        let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            out.push_str(raw);
-            continue;
-        }
-        if in_fence {
-            out.push_str(raw);
-            continue;
-        }
-        out.push_str(&rewrite_line(raw, pin, files, href));
-    }
-    if body.ends_with('\n') {
-        out.push('\n');
-    }
-    out
+/// Переписывает вики-ссылки и теги в обычные ссылки Markdown до разбора.
+struct Rewriter<'a, F: Fn(LocalLink) -> String> {
+    from: &'a Path,
+    /// Текст текущего файла: по нему ищется заголовок у `[[#Раздел]]`.
+    source: &'a str,
+    pin: Option<&'a Path>,
+    lookup: WikiLookup<'a>,
+    href: &'a F,
 }
 
-fn rewrite_line(
-    line: &str,
-    pin: Option<&Path>,
-    files: &[PathBuf],
-    href: &impl Fn(LocalLink) -> String,
-) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    let mut code = false;
-    while i < chars.len() {
-        if chars[i] == '`' {
-            code = !code;
-            out.push('`');
-            i += 1;
-            continue;
+impl<F: Fn(LocalLink) -> String> Rewriter<'_, F> {
+    fn rewrite(&self, source: &str) -> String {
+        let (front, body) = split_frontmatter(source);
+        let mut out = String::with_capacity(source.len() + 64);
+        if let Some(front) = front {
+            out.push_str(front);
         }
-        if !code && chars[i] == '[' && i + 1 < chars.len() && chars[i + 1] == '[' {
-            if let Some(end) = find_seq(&chars, i + 2, &[']', ']']) {
-                let inner: String = chars[i + 2..end].iter().collect();
-                out.push_str(&wiki_markdown(&inner, pin, files, href));
-                i = end + 2;
+        let mut literal = Literal::new(literal_ranges(body, false));
+        let mut base = 0;
+        for piece in body.split_inclusive('\n') {
+            let line = piece.trim_end_matches(['\n', '\r']);
+            self.rewrite_line(line, base, &mut literal, &mut out);
+            out.push_str(&piece[line.len()..]);
+            base += piece.len();
+        }
+        out
+    }
+
+    /// `base` — смещение строки в теле заметки, по нему сверяется `literal`.
+    fn rewrite_line(&self, line: &str, base: usize, literal: &mut Literal, out: &mut String) {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            // Код и сырой HTML переносятся как есть: там нет ни ссылок, ни тегов.
+            if let Some(end) = literal.covering(base + i) {
+                let stop = (end - base).min(line.len());
+                out.push_str(&line[i..stop]);
+                i = stop;
                 continue;
             }
-        }
-        if code {
-            out.push(chars[i]);
-            i += 1;
-            continue;
-        }
-        if chars[i] == '[' && (i == 0 || chars[i - 1] != '!') {
-            out.push('[');
-            i += 1;
-            if let Some(end) = skip_link_label_and_dest(&chars, i) {
-                out.extend(chars[i..end].iter());
-                i = end;
+            if bytes[i] == b'[' {
+                if let Some(link) = wiki_at(line, i) {
+                    out.push_str(&self.wiki_markdown(&link.parts));
+                    i = link.end;
+                    continue;
+                }
+                if i == 0 || bytes[i - 1] != b'!' {
+                    out.push('[');
+                    i += 1;
+                    if let Some(end) = skip_link_label_and_dest(bytes, i) {
+                        out.push_str(&line[i..end]);
+                        i = end;
+                    }
+                    continue;
+                }
             }
-            continue;
+            if let Some(tag) = tag_at(line, i) {
+                out.push_str(&format!(
+                    "[{}]({})",
+                    &line[i..tag.end],
+                    (self.href)(LocalLink::Tag { name: tag.name })
+                ));
+                i = tag.end;
+                continue;
+            }
+            let ch = line[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
         }
-        if let Some(tag) = tag_at(&chars, i) {
-            let label: String = chars[i..tag.end].iter().collect();
-            out.push_str(&format!(
-                "[{label}]({})",
-                href(LocalLink::Tag { name: tag.name })
-            ));
-            i = tag.end;
-            continue;
+    }
+
+    fn wiki_markdown(&self, parts: &WikiParts) -> String {
+        let target = parts.target;
+        let link = if target.is_empty() {
+            LocalLink::Open {
+                path: self.from.to_path_buf(),
+                line: parts
+                    .fragment
+                    .and_then(|fragment| fragment_line(self.source, fragment)),
+            }
+        } else {
+            match self.pin {
+                Some(pin) => {
+                    let matches = self.lookup.resolve(target, pin);
+                    match matches.as_slice() {
+                        [only] => LocalLink::Open {
+                            path: only.clone(),
+                            line: parts
+                                .fragment
+                                .and_then(|fragment| heading_line(only, fragment)),
+                        },
+                        [] => LocalLink::Missing {
+                            label: target.to_string(),
+                        },
+                        _ => LocalLink::Pick {
+                            name: target.to_string(),
+                        },
+                    }
+                }
+                None => LocalLink::Missing {
+                    label: target.to_string(),
+                },
+            }
+        };
+        format!(
+            "[{}]({})",
+            escape_label(&wiki_label(parts)),
+            (self.href)(link)
+        )
+    }
+}
+
+/// Видимый текст вики-ссылки: подпись, иначе «Заметка > Раздел», как в Obsidian.
+fn wiki_label(parts: &WikiParts) -> String {
+    if let Some(alias) = parts.alias {
+        return alias.to_string();
+    }
+    match (parts.target, parts.fragment) {
+        ("", Some(fragment)) => fragment.to_string(),
+        (target, Some(fragment)) => format!("{target} > {fragment}"),
+        (target, None) => target.to_string(),
+    }
+}
+
+/// Подпись вставляется в `[подпись](адрес)` буквально: скобки, `*`, `` ` ``
+/// и прочая пунктуация ASCII экранируются, чтобы не сломать ссылку.
+fn escape_label(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_punctuation() {
+            out.push('\\');
         }
-        out.push(chars[i]);
-        i += 1;
+        out.push(ch);
     }
     out
 }
@@ -390,28 +605,87 @@ pub fn extract_tags(source: &str) -> Vec<String> {
     if let Some(front) = front {
         collect_frontmatter_tags(front, &mut tags);
     }
-    let mut in_fence = false;
-    for raw in body.lines() {
-        let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+    let mut literal = Literal::new(literal_ranges(body, true));
+    let mut i = 0;
+    while let Some(found) = body[i..].find(['#', '[']) {
+        let at = i + found;
+        if let Some(end) = literal.covering(at) {
+            i = end.max(at + 1);
             continue;
         }
-        if in_fence {
+        // `[[#Раздел]]` и `[[Заметка#Раздел]]` — ссылки, а не теги.
+        if body.as_bytes()[at] == b'[' {
+            i = wiki_at(body, at).map_or(at + 1, |link| link.end);
             continue;
         }
-        let chars: Vec<char> = raw.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if let Some(tag) = tag_at(&chars, i) {
-                push_tag(&mut tags, tag.name);
-                i = tag.end;
-                continue;
-            }
-            i += 1;
+        if let Some(tag) = tag_at(body, at) {
+            push_tag(&mut tags, tag.name);
+            i = tag.end;
+            continue;
         }
+        i = at + 1;
     }
     tags
+}
+
+/// Участки тела заметки, где `#` и `[[` — просто текст: код строчный,
+/// блоком в ограде и с отступом, сырой HTML (`<a href="#x">`). С `links`
+/// ещё и обычные ссылки целиком (`[текст](#раздел)`). Разбор тот же, что у
+/// предпросмотра, так что границы кода совпадают с показанными.
+/// Участки отсортированы и не пересекаются.
+fn literal_ranges(body: &str, links: bool) -> Vec<Range<usize>> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
+        let literal = match event {
+            Event::Start(Tag::CodeBlock(_))
+            | Event::Start(Tag::HtmlBlock)
+            | Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_) => true,
+            Event::Start(Tag::Link { .. }) => links,
+            _ => false,
+        };
+        if literal && range.start < range.end {
+            ranges.push(range);
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Проход по участкам `literal_ranges` с растущими смещениями: каждая
+/// проверка — без пересчёта строки с начала.
+struct Literal {
+    ranges: Vec<Range<usize>>,
+    at: usize,
+}
+
+impl Literal {
+    fn new(ranges: Vec<Range<usize>>) -> Self {
+        Self { ranges, at: 0 }
+    }
+
+    /// Конец участка, внутри которого лежит `pos`. Смещения не убывают.
+    fn covering(&mut self, pos: usize) -> Option<usize> {
+        while self.ranges.get(self.at).is_some_and(|range| range.end <= pos) {
+            self.at += 1;
+        }
+        self.ranges
+            .get(self.at)
+            .filter(|range| range.start <= pos)
+            .map(|range| range.end)
+    }
 }
 
 pub fn canonical_tag(raw: &str) -> Option<String> {
@@ -430,35 +704,33 @@ struct FoundTag {
     end: usize,
 }
 
-fn tag_at(chars: &[char], index: usize) -> Option<FoundTag> {
-    if chars.get(index) != Some(&'#') {
+/// Тег `#имя` ровно в `index`. Код и HTML отсекает вызывающий по `literal_ranges`.
+fn tag_at(line: &str, index: usize) -> Option<FoundTag> {
+    if line.as_bytes().get(index) != Some(&b'#') {
         return None;
     }
-    if index > 0 && tag_glue(chars[index - 1]) {
+    if line[..index].chars().next_back().is_some_and(tag_glue) {
         return None;
     }
-    if in_inline_code(chars, index) {
+    let body_start = index + 1;
+    let body_len: usize = line[body_start..]
+        .chars()
+        .take_while(|ch| is_tag_char(*ch))
+        .map(char::len_utf8)
+        .sum();
+    if body_len == 0 {
         return None;
     }
-    let mut end = index + 1;
-    let body_start = end;
-    while end < chars.len() && is_tag_char(chars[end]) {
-        end += 1;
-    }
-    if end == body_start {
-        return None;
-    }
-    let body: String = chars[body_start..end].iter().collect();
-    let name = canonical_tag(&body)?;
+    let end = body_start + body_len;
+    let name = canonical_tag(&line[body_start..end])?;
     Some(FoundTag { name, end })
 }
 
-fn in_inline_code(chars: &[char], index: usize) -> bool {
-    chars[..index].iter().filter(|ch| **ch == '`').count() % 2 == 1
-}
-
+/// Знак перед `#`, с которым это не тег: слово (`C#`), адрес (`a.md#x`)
+/// или экранирование (`\#`).
 fn tag_glue(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | '#' | '/' | '.' | ':' | '?' | '&' | '=' | '-')
+    ch.is_alphanumeric()
+        || matches!(ch, '_' | '#' | '/' | '.' | ':' | '?' | '&' | '=' | '-' | '\\')
 }
 
 fn is_tag_char(ch: char) -> bool {
@@ -467,6 +739,10 @@ fn is_tag_char(ch: char) -> bool {
 
 fn tag_body_ok(body: &str) -> bool {
     if body.is_empty() || body.chars().count() > 80 {
+        return false;
+    }
+    // Как в Obsidian: `#123` — номер, а не тег; нужен хотя бы один не цифровой знак.
+    if body.chars().all(|ch| ch.is_numeric() || ch == '/') {
         return false;
     }
     body.split('/').all(|part| {
@@ -486,6 +762,7 @@ fn push_tag(tags: &mut Vec<String>, tag: String) {
 }
 
 fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
+    let source = strip_bom(source);
     let Some(rest) = source.strip_prefix("---") else {
         return (None, source);
     };
@@ -593,21 +870,21 @@ fn split_tag_list(raw: &str) -> Vec<String> {
     out
 }
 
-fn skip_link_label_and_dest(chars: &[char], start: usize) -> Option<usize> {
+fn skip_link_label_and_dest(bytes: &[u8], start: usize) -> Option<usize> {
     let mut i = start;
     let mut depth = 1;
-    while i < chars.len() {
-        match chars[i] {
-            '[' => depth += 1,
-            ']' => {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => depth += 1,
+            b']' => {
                 depth -= 1;
                 if depth == 0 {
-                    if i + 1 < chars.len() && chars[i + 1] == '(' {
+                    if bytes.get(i + 1) == Some(&b'(') {
                         i += 2;
-                        while i < chars.len() && chars[i] != ')' {
+                        while i < bytes.len() && bytes[i] != b')' {
                             i += 1;
                         }
-                        if i < chars.len() {
+                        if i < bytes.len() {
                             i += 1;
                         }
                     } else {
@@ -621,42 +898,6 @@ fn skip_link_label_and_dest(chars: &[char], start: usize) -> Option<usize> {
         i += 1;
     }
     None
-}
-
-fn wiki_markdown(
-    inner: &str,
-    pin: Option<&Path>,
-    files: &[PathBuf],
-    href: &impl Fn(LocalLink) -> String,
-) -> String {
-    let target = wiki_target(inner);
-    let label = inner
-        .split('|')
-        .nth(1)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(target.as_str());
-    let link = match pin {
-        Some(pin) => {
-            let matches = resolve_wiki(&target, pin, files);
-            match matches.as_slice() {
-                [only] => LocalLink::Open {
-                    path: only.clone(),
-                    line: None,
-                },
-                [] => LocalLink::Missing {
-                    label: target.clone(),
-                },
-                _ => LocalLink::Pick {
-                    name: target.clone(),
-                },
-            }
-        }
-        None => LocalLink::Missing {
-            label: target.clone(),
-        },
-    };
-    format!("[{label}]({})", href(link))
 }
 
 pub fn encode_path(path: &str) -> String {
@@ -772,8 +1013,7 @@ fn existing_file(path: &Path) -> Option<PathBuf> {
 }
 
 fn heading_line(path: &Path, fragment: &str) -> Option<usize> {
-    let ext = path.extension().and_then(|ext| ext.to_str())?;
-    if ext != "md" && ext != "markdown" {
+    if !has_markdown_ext(path) {
         return None;
     }
     let meta = std::fs::metadata(path).ok()?;
@@ -781,11 +1021,33 @@ fn heading_line(path: &Path, fragment: &str) -> Option<usize> {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
-    let want = slug(fragment);
-    headings(&text)
+    fragment_line(&text, fragment)
+}
+
+/// Строка раздела `#Заголовок` или блока `#^метка` в тексте заметки.
+/// Заголовок сравнивается без учёта регистра или по слагу; у вложенного
+/// `#Глава#Часть` берётся последний.
+pub fn fragment_line(text: &str, fragment: &str) -> Option<usize> {
+    let fragment = fragment.trim();
+    if let Some(block) = fragment.strip_prefix('^') {
+        let mark = format!("^{}", block.trim());
+        let spaced = format!(" {mark}");
+        return strip_bom(text).lines().position(|line| {
+            let line = line.trim_end();
+            line == mark || line.ends_with(&spaced)
+        });
+    }
+    let wanted = fragment.rsplit('#').next().unwrap_or(fragment).trim();
+    if wanted.is_empty() {
+        return None;
+    }
+    let lower = wanted.to_lowercase();
+    let want = slug(wanted);
+    headings(text)
         .into_iter()
         .find(|heading| {
-            heading.text.to_lowercase() == fragment.to_lowercase() || slug(&heading.text) == want
+            heading.text.to_lowercase() == lower
+                || (!want.is_empty() && slug(&heading.text) == want)
         })
         .map(|heading| heading.line)
 }
@@ -925,6 +1187,47 @@ title: Заметка
     }
 
     #[test]
+    fn tags_skip_html_indented_code_inline_code_and_numbers() {
+        let source = "\
+Текст #есть и <a href=\"#якорь\">ссылка</a>.
+``код с ` и #внутри`` и `#строчный` и #после
+Номер #123 и #2024/10, но #2024год и #п1.
+[ссылка](#раздел) и [[#Раздел]] и \\#экран
+
+    #отступ в коде
+
+- пункт
+
+    #продолжение пункта
+";
+        assert_eq!(
+            extract_tags(source),
+            vec![
+                "есть".to_string(),
+                "после".to_string(),
+                "2024год".to_string(),
+                "п1".to_string(),
+                "продолжение".to_string(),
+            ]
+        );
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(html.contains(r##"<a href="#якорь">"##));
+        assert!(!html.contains(&format!("tag:{}", encode_path("якорь"))));
+        assert!(html.contains(&format!("tag:{}", encode_path("после"))));
+        assert!(!html.contains(&format!("tag:{}", encode_path("внутри"))));
+        assert!(!html.contains(&format!("tag:{}", encode_path("отступ"))));
+        assert!(!html.contains("tag:123"));
+    }
+
+    #[test]
+    fn long_line_with_many_backticks_and_hashes() {
+        let line = "`код` #тег ".repeat(20_000);
+        assert_eq!(extract_tags(&line), vec!["тег".to_string()]);
+        let html = render_html(&line, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(html.contains(&format!("tag:{}", encode_path("тег"))));
+    }
+
+    #[test]
     fn preview_turns_a_tag_into_a_link() {
         let html = render_html(
             "См. #Тема и [файл](note.md#часть).",
@@ -984,6 +1287,155 @@ title: Заметка
         assert!(missing.contains("missing:"));
         assert!(!missing.contains("twmissing:"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn frontmatter_is_not_a_heading() {
+        let source = "---\ntags: [проект]\n# комментарий\n---\n# Заголовок\nтекст\n";
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(!html.contains("<hr"));
+        assert!(!html.contains("<h2"));
+        assert!(!html.contains("проект"));
+        assert!(html.contains("<h1>Заголовок</h1>"));
+        assert!(html.contains(r#"id="twl4""#));
+        let found = headings(source);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "Заголовок");
+        assert_eq!(found[0].line, 4);
+        assert_eq!(extract_tags(source), vec!["проект".to_string()]);
+    }
+
+    #[test]
+    fn bom_does_not_hide_heading_or_frontmatter() {
+        let source = "\u{feff}# Заголовок\nтекст #тег\n";
+        let found = headings(source);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "Заголовок");
+        assert_eq!(found[0].line, 0);
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(html.contains("<h1>Заголовок</h1>"));
+        let source = "\u{feff}---\ntags: [проект]\n---\n# Тема\n";
+        let (front, body) = split_frontmatter(source);
+        assert_eq!(front, Some("---\ntags: [проект]\n---\n"));
+        assert_eq!(body, "# Тема\n");
+        assert_eq!(extract_tags(source), vec!["проект".to_string()]);
+        assert_eq!(headings(source)[0].line, 3);
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(!html.contains("<hr"));
+    }
+
+    #[test]
+    fn wiki_parts_follow_obsidian() {
+        let parts = wiki_parts(" Заметка#Раздел | подпись ").unwrap();
+        assert_eq!(parts.target, "Заметка");
+        assert_eq!(parts.fragment, Some("Раздел"));
+        assert_eq!(parts.alias, Some("подпись"));
+        assert_eq!(parts.link, "Заметка#Раздел");
+        let block = wiki_parts("Заметка#^блок").unwrap();
+        assert_eq!(block.target, "Заметка");
+        assert_eq!(block.fragment, Some("^блок"));
+        let here = wiki_parts("#Раздел").unwrap();
+        assert_eq!(here.target, "");
+        assert_eq!(here.fragment, Some("Раздел"));
+        let table = wiki_parts("Заметка\\|подпись").unwrap();
+        assert_eq!(table.target, "Заметка");
+        assert_eq!(table.alias, Some("подпись"));
+        assert!(wiki_parts("").is_none());
+        assert!(wiki_parts(" | подпись").is_none());
+        assert!(wiki_parts("a]b").is_none());
+        let line = "до [[Заметка|под]пись]] после";
+        let link = wiki_at(line, line.find("[[").unwrap()).unwrap();
+        assert_eq!(link.parts.alias, Some("под]пись"));
+        assert_eq!(&line[link.shown..link.end], "под]пись]]");
+        assert!(wiki_at("[[a[b]]", 0).is_none());
+        assert!(wiki_at("[[раз\nдва]]", 0).is_none());
+    }
+
+    #[test]
+    fn wiki_links_with_section_alias_and_block_point_at_the_note() {
+        let source = "[[Заметка#Раздел]] [[Заметка#^блок]] [[Заметка|подпись]] [[#Раздел]] [[a[b]]";
+        let links = extract_links(source);
+        assert_eq!(links.len(), 3);
+        assert!(links
+            .iter()
+            .all(|link| link.kind == LinkKind::Wiki && link.target == "Заметка"));
+    }
+
+    #[test]
+    fn wiki_names_ignore_case() {
+        let pin = Path::new("/repo");
+        let files = vec![
+            PathBuf::from("/repo/Заметка.md"),
+            PathBuf::from("/repo/Папка/Итоги.MD"),
+            PathBuf::from("/repo/Папка/Другое.markdown"),
+        ];
+        let note = vec![PathBuf::from("/repo/Заметка.md")];
+        assert_eq!(resolve_wiki("заметка", pin, &files), note);
+        assert_eq!(resolve_wiki("ЗАМЕТКА#Раздел|подпись", pin, &files), note);
+        assert_eq!(resolve_wiki("заметка.MD", pin, &files), note);
+        assert_eq!(
+            resolve_wiki("папка/итоги.md", pin, &files),
+            vec![PathBuf::from("/repo/Папка/Итоги.MD")]
+        );
+        assert_eq!(
+            resolve_wiki("Другое.MARKDOWN", pin, &files),
+            vec![PathBuf::from("/repo/Папка/Другое.markdown")]
+        );
+        assert!(resolve_wiki("#Раздел", pin, &files).is_empty());
+        assert!(resolve_wiki("нет", pin, &files).is_empty());
+    }
+
+    #[test]
+    fn wiki_section_opens_heading_line() {
+        let dir = std::env::temp_dir().join(format!("verst_wiki_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let note = dir.join("Заметка.md");
+        std::fs::write(&note, "# Начало\nтекст\n## Второй раздел\nтекст ^блок\n").unwrap();
+        let from = dir.join("index.md");
+        let files = vec![note.clone()];
+        let html = render_html(
+            "[[заметка#второй раздел]] [[Заметка#^блок|блок]]\n\n## Здесь\n[[#Здесь]]",
+            &from,
+            Some(&dir),
+            &files,
+            &href,
+            "missing:",
+        );
+        // pulldown-cmark кодирует не-ASCII в адресе так же, как encode_path.
+        let note_href = encode_path(&note.display().to_string());
+        assert!(html.contains(&format!("open:{note_href}:2")));
+        assert!(html.contains(&format!("open:{note_href}:3")));
+        assert!(html.contains(&format!("open:{}:2", from.display())));
+        assert!(html.contains("заметка &gt; второй раздел"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wiki_caption_cannot_break_the_link() {
+        let pin = Path::new("/repo");
+        let files = vec![PathBuf::from("/repo/a.md")];
+        let html = render_html(
+            "[[a|под]пись](https://example.com) *x*]]",
+            Path::new("/repo/index.md"),
+            Some(pin),
+            &files,
+            &href,
+            "missing:",
+        );
+        assert!(html.contains(&format!(
+            r#"<a href="open:{}:">под]пись](https://example.com) *x*</a>"#,
+            Path::new("/repo/a.md").display()
+        )));
+        assert!(!html.contains(r#"href="https://example.com""#));
+        let broken = render_html(
+            "[[a[b]]",
+            Path::new("/repo/index.md"),
+            Some(pin),
+            &files,
+            &href,
+            "missing:",
+        );
+        assert!(!broken.contains("<a "));
     }
 
     #[test]

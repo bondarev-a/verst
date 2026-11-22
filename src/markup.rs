@@ -28,6 +28,7 @@ pub enum MarkKind {
         dest: String,
     },
     /// Вики-ссылка `[[цель]]` или `[[цель|подпись]]`. Видна подпись или цель.
+    /// `target` — всё до `|`, вместе с `#раздел`; части даёт `markdown::wiki_parts`.
     WikiLink {
         target: String,
     },
@@ -66,16 +67,39 @@ enum Frame {
 
 /// Смещения по исходному тексту, без переписывания вики-ссылок.
 pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
+    // Метка порядка байтов остаётся в буфере редактора, но мешает разбору
+    // первой строки. Разбираем текст без неё и сдвигаем смещения обратно.
+    let text = crate::markdown::strip_bom(source);
+    let bom = source.len() - text.len();
+    let mut out = spans_of(text);
+    if bom > 0 {
+        for span in &mut out {
+            span.start += bom;
+            span.end += bom;
+        }
+    }
+    out
+}
+
+fn spans_of(source: &str) -> Vec<MarkSpan> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    // Шапка YAML иначе читается как линия и заголовок второго уровня.
+    options.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let parser = Parser::new_ext(source, options).into_offset_iter();
 
     let mut out = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
 
     for (event, range) in parser {
+        // Содержимое конструкции начинается с первого вложенного события
+        // любого вида: текста, кода, начала вложенного тега. Иначе у
+        // «# `код`» или «[**x**](url)» обрамление внешней рамки не пряталось.
+        if !matches!(event, Event::End(_)) {
+            push_child(&mut stack, range.clone());
+        }
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 stack.push(Frame::Heading {
@@ -151,10 +175,11 @@ pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
                     });
                 }
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            // Шапка показывается как блок кода: моноширинно, без меток заголовка.
+            Event::Start(Tag::CodeBlock(_)) | Event::Start(Tag::MetadataBlock(_)) => {
                 stack.push(Frame::CodeBlock { full: range });
             }
-            Event::End(TagEnd::CodeBlock) => {
+            Event::End(TagEnd::CodeBlock) | Event::End(TagEnd::MetadataBlock(_)) => {
                 if let Some(Frame::CodeBlock { full }) = pop_code_block(&mut stack) {
                     out.push(MarkSpan {
                         kind: MarkKind::CodeBlock,
@@ -219,9 +244,6 @@ pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
                     });
                 }
             }
-            Event::Text(_) | Event::SoftBreak | Event::HardBreak => {
-                push_text(&mut stack, range);
-            }
             _ => {}
         }
     }
@@ -235,53 +257,42 @@ pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
 }
 
 /// pulldown-cmark не знает `[[…]]`, поэтому вики-ссылки ищутся отдельно,
-/// вне кода. Ссылка не переносится на другую строку.
+/// вне кода, тем же разбором, что и в предпросмотре и индексе.
 fn wiki_spans(source: &str, code: &[(usize, usize)], out: &mut Vec<MarkSpan>) {
-    let bytes = source.as_bytes();
     let mut at = 0;
     while let Some(found) = source[at..].find("[[") {
         let start = at + found;
-        let Some(close) = source[start + 2..].find("]]") else {
-            break;
-        };
-        let inner_start = start + 2;
-        let inner_end = inner_start + close;
-        let end = inner_end + 2;
-        let inner = &source[inner_start..inner_end];
-        let in_code = code.iter().any(|(a, b)| start < *b && end > *a);
-        if inner.contains('\n') || inner.contains('[') {
+        let Some(link) = crate::markdown::wiki_at(source, start) else {
             at = start + 1;
             continue;
-        }
-        at = end;
-        if in_code || inner.trim().is_empty() || bytes.get(end) == Some(&b']') {
+        };
+        at = link.end;
+        if code.iter().any(|(a, b)| start < *b && link.end > *a) {
             continue;
         }
-        let (target, shown) = match inner.find('|') {
-            Some(bar) => (&inner[..bar], inner_start + bar + 1),
-            None => (inner, inner_start),
-        };
         out.push(MarkSpan {
             kind: MarkKind::LinkMarkup,
             start,
-            end: shown,
+            end: link.shown,
         });
         out.push(MarkSpan {
             kind: MarkKind::LinkMarkup,
-            start: inner_end,
-            end,
+            start: link.end - 2,
+            end: link.end,
         });
         out.push(MarkSpan {
             kind: MarkKind::WikiLink {
-                target: target.trim().to_string(),
+                target: link.parts.link.to_string(),
             },
             start,
-            end,
+            end: link.end,
         });
     }
 }
 
-fn push_text(stack: &mut [Frame], range: std::ops::Range<usize>) {
+/// Запоминает вложенное событие в верхней рамке: по первому и последнему
+/// из них видно, где кончается открывающее обрамление и начинается закрывающее.
+fn push_child(stack: &mut [Frame], range: std::ops::Range<usize>) {
     match stack.last_mut() {
         Some(Frame::Heading { texts, .. })
         | Some(Frame::Strong { texts, .. })
@@ -459,12 +470,117 @@ mod tests {
     }
 
     #[test]
+    fn wiki_link_with_section_keeps_it_in_target() {
+        let source = "[[Заметка#Раздел|подпись]] и [[#Здесь]]\n";
+        let spans = mark_spans(source);
+        assert_eq!(
+            markup_of(source, &spans),
+            vec!["[[Заметка#Раздел|", "]]", "[[", "]]"]
+        );
+        let targets: Vec<&str> = spans
+            .iter()
+            .filter_map(|s| match &s.kind {
+                MarkKind::WikiLink { target } => Some(target.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets, vec!["Заметка#Раздел", "#Здесь"]);
+    }
+
+    #[test]
     fn wiki_link_inside_code_is_text() {
         let source = "`[[код]]`\n\n```\n[[блок]]\n```\n";
         let spans = mark_spans(source);
         assert!(!spans
             .iter()
             .any(|s| matches!(s.kind, MarkKind::WikiLink { .. })));
+    }
+
+    #[test]
+    fn frontmatter_is_a_code_block_not_a_heading() {
+        let source = "---\ntags: [проект]\n---\n# Заголовок\n";
+        let spans = mark_spans(source);
+        let headings: Vec<&MarkSpan> = spans
+            .iter()
+            .filter(|s| matches!(s.kind, MarkKind::Heading { .. }))
+            .collect();
+        assert_eq!(headings.len(), 1);
+        assert_eq!(&source[headings[0].start..headings[0].end], "# Заголовок\n");
+        let block = spans
+            .iter()
+            .find(|s| s.kind == MarkKind::CodeBlock)
+            .unwrap();
+        assert_eq!(block.start, 0);
+        assert!(source[block.start..block.end].contains("tags: [проект]"));
+    }
+
+    #[test]
+    fn bom_keeps_heading_and_offsets() {
+        let source = "\u{feff}# Заголовок\n[[Заметка]]\n";
+        let spans = mark_spans(source);
+        let heading = spans
+            .iter()
+            .find(|s| matches!(s.kind, MarkKind::Heading { level: 1 }))
+            .unwrap();
+        assert_eq!(&source[heading.start..heading.end], "# Заголовок\n");
+        let mark = spans.iter().find(|s| s.kind == MarkKind::HeadingMark).unwrap();
+        assert_eq!(&source[mark.start..mark.end], "# ");
+        let link = spans
+            .iter()
+            .find(|s| matches!(s.kind, MarkKind::WikiLink { .. }))
+            .unwrap();
+        assert_eq!(&source[link.start..link.end], "[[Заметка]]");
+    }
+
+    fn texts_of(source: &str, spans: &[MarkSpan], kind: MarkKind) -> Vec<String> {
+        spans
+            .iter()
+            .filter(|s| s.kind == kind)
+            .map(|s| source[s.start..s.end].to_string())
+            .collect()
+    }
+
+    #[test]
+    fn heading_starting_with_code_or_strong_hides_its_mark() {
+        let source = "# `код` описание\n";
+        let spans = mark_spans(source);
+        assert_eq!(texts_of(source, &spans, MarkKind::HeadingMark), vec!["# "]);
+        assert_eq!(texts_of(source, &spans, MarkKind::Code), vec!["код"]);
+        assert_eq!(texts_of(source, &spans, MarkKind::Delimiter), vec!["`", "`"]);
+
+        let source = "# **Жирный**\n";
+        let spans = mark_spans(source);
+        assert_eq!(texts_of(source, &spans, MarkKind::HeadingMark), vec!["# "]);
+        assert_eq!(texts_of(source, &spans, MarkKind::Strong), vec!["Жирный"]);
+        assert_eq!(
+            texts_of(source, &spans, MarkKind::Delimiter),
+            vec!["**", "**"]
+        );
+    }
+
+    #[test]
+    fn emphasis_starting_with_code_hides_its_stars() {
+        let source = "*`код` и текст*\n";
+        let spans = mark_spans(source);
+        assert_eq!(
+            texts_of(source, &spans, MarkKind::Emphasis),
+            vec!["`код` и текст"]
+        );
+        let delimiters = texts_of(source, &spans, MarkKind::Delimiter);
+        assert_eq!(delimiters.iter().filter(|d| *d == "*").count(), 2);
+        assert_eq!(delimiters.iter().filter(|d| *d == "`").count(), 2);
+    }
+
+    #[test]
+    fn link_starting_with_code_or_strong_hides_its_brackets() {
+        let source = "[`код` x](url) и [**Жирный**](адрес)\n";
+        let spans = mark_spans(source);
+        assert_eq!(
+            markup_of(source, &spans),
+            vec!["[", "](url)", "[", "](адрес)"]
+        );
+        assert_eq!(texts_of(source, &spans, MarkKind::Code), vec!["код"]);
+        assert_eq!(texts_of(source, &spans, MarkKind::Strong), vec!["Жирный"]);
     }
 
     #[test]

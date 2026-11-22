@@ -41,6 +41,19 @@ pub fn is_view_only(path: &Path) -> bool {
     !is_text(path)
 }
 
+/// Двоичные форматы, которые не показываются вовсе: архивы, объектные
+/// файлы, шрифты, базы данных, MP4.
+const OPAQUE_EXT: &[&str] = &[
+    "zip", "gz", "tgz", "bz2", "xz", "7z", "o", "a", "so", "dylib", "wasm", "mp4", "ttf", "otf",
+    "woff", "woff2", "class", "jar", "sqlite", "db",
+];
+
+/// Не текст: то, что только смотрим (картинки, PDF, звук, видео), и прочие
+/// двоичные форматы. Единый список для поиска и списков текстовых файлов.
+pub fn is_binary(path: &Path) -> bool {
+    is_view_only(path) || extension(path).is_some_and(|ext| OPAQUE_EXT.contains(&ext.as_str()))
+}
+
 fn extension(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -70,5 +83,17 @@ mod tests {
         assert!(!is_view_only(Path::new("icon.svg")));
         assert!(is_view_only(Path::new("photo.jpg")));
         assert!(!is_view_only(Path::new("note.md")));
+    }
+
+    #[test]
+    fn binary_covers_viewed_and_opaque_files() {
+        assert!(is_binary(Path::new("архив.ZIP")));
+        assert!(is_binary(Path::new("шрифт.woff2")));
+        assert!(is_binary(Path::new("фото.jpg")));
+        assert!(is_binary(Path::new("запись.ogg")));
+        assert!(!is_binary(Path::new("заметка.md")));
+        assert!(!is_binary(Path::new("страница.html")));
+        assert!(!is_binary(Path::new("значок.svg")));
+        assert!(!is_binary(Path::new("Makefile")));
     }
 }
