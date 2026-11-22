@@ -1,5 +1,6 @@
 use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use pulldown_cmark::{html, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
@@ -473,46 +474,34 @@ struct Rewriter<'a, F: Fn(LocalLink) -> String> {
 impl<F: Fn(LocalLink) -> String> Rewriter<'_, F> {
     fn rewrite(&self, source: &str) -> String {
         let (front, body) = split_frontmatter(source);
-        let mut out = String::new();
+        let mut out = String::with_capacity(source.len() + 64);
         if let Some(front) = front {
             out.push_str(front);
         }
-        let mut in_fence = false;
-        for (index, raw) in body.lines().enumerate() {
-            if index > 0 {
-                out.push('\n');
-            }
-            let trimmed = raw.trim_start();
-            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-                in_fence = !in_fence;
-                out.push_str(raw);
-                continue;
-            }
-            if in_fence {
-                out.push_str(raw);
-                continue;
-            }
-            out.push_str(&self.rewrite_line(raw));
-        }
-        if body.ends_with('\n') {
-            out.push('\n');
+        let mut literal = Literal::new(literal_ranges(body, false));
+        let mut base = 0;
+        for piece in body.split_inclusive('\n') {
+            let line = piece.trim_end_matches(['\n', '\r']);
+            self.rewrite_line(line, base, &mut literal, &mut out);
+            out.push_str(&piece[line.len()..]);
+            base += piece.len();
         }
         out
     }
 
-    fn rewrite_line(&self, line: &str) -> String {
+    /// `base` — смещение строки в теле заметки, по нему сверяется `literal`.
+    fn rewrite_line(&self, line: &str, base: usize, literal: &mut Literal, out: &mut String) {
         let bytes = line.as_bytes();
-        let mut out = String::new();
         let mut i = 0;
-        let mut code = false;
         while i < bytes.len() {
-            if bytes[i] == b'`' {
-                code = !code;
-                out.push('`');
-                i += 1;
+            // Код и сырой HTML переносятся как есть: там нет ни ссылок, ни тегов.
+            if let Some(end) = literal.covering(base + i) {
+                let stop = (end - base).min(line.len());
+                out.push_str(&line[i..stop]);
+                i = stop;
                 continue;
             }
-            if !code && bytes[i] == b'[' {
+            if bytes[i] == b'[' {
                 if let Some(link) = wiki_at(line, i) {
                     out.push_str(&self.wiki_markdown(&link.parts));
                     i = link.end;
@@ -528,22 +517,19 @@ impl<F: Fn(LocalLink) -> String> Rewriter<'_, F> {
                     continue;
                 }
             }
-            if !code {
-                if let Some(tag) = tag_at(line, i) {
-                    out.push_str(&format!(
-                        "[{}]({})",
-                        &line[i..tag.end],
-                        (self.href)(LocalLink::Tag { name: tag.name })
-                    ));
-                    i = tag.end;
-                    continue;
-                }
+            if let Some(tag) = tag_at(line, i) {
+                out.push_str(&format!(
+                    "[{}]({})",
+                    &line[i..tag.end],
+                    (self.href)(LocalLink::Tag { name: tag.name })
+                ));
+                i = tag.end;
+                continue;
             }
             let ch = line[i..].chars().next().unwrap_or(' ');
             out.push(ch);
             i += ch.len_utf8();
         }
-        out
     }
 
     fn wiki_markdown(&self, parts: &WikiParts) -> String {
@@ -619,27 +605,87 @@ pub fn extract_tags(source: &str) -> Vec<String> {
     if let Some(front) = front {
         collect_frontmatter_tags(front, &mut tags);
     }
-    let mut in_fence = false;
-    for raw in body.lines() {
-        let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+    let mut literal = Literal::new(literal_ranges(body, true));
+    let mut i = 0;
+    while let Some(found) = body[i..].find(['#', '[']) {
+        let at = i + found;
+        if let Some(end) = literal.covering(at) {
+            i = end.max(at + 1);
             continue;
         }
-        if in_fence {
+        // `[[#Раздел]]` и `[[Заметка#Раздел]]` — ссылки, а не теги.
+        if body.as_bytes()[at] == b'[' {
+            i = wiki_at(body, at).map_or(at + 1, |link| link.end);
             continue;
         }
-        let mut i = 0;
-        while i < raw.len() {
-            if let Some(tag) = tag_at(raw, i) {
-                push_tag(&mut tags, tag.name);
-                i = tag.end;
-                continue;
-            }
-            i += 1;
+        if let Some(tag) = tag_at(body, at) {
+            push_tag(&mut tags, tag.name);
+            i = tag.end;
+            continue;
         }
+        i = at + 1;
     }
     tags
+}
+
+/// Участки тела заметки, где `#` и `[[` — просто текст: код строчный,
+/// блоком в ограде и с отступом, сырой HTML (`<a href="#x">`). С `links`
+/// ещё и обычные ссылки целиком (`[текст](#раздел)`). Разбор тот же, что у
+/// предпросмотра, так что границы кода совпадают с показанными.
+/// Участки отсортированы и не пересекаются.
+fn literal_ranges(body: &str, links: bool) -> Vec<Range<usize>> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
+        let literal = match event {
+            Event::Start(Tag::CodeBlock(_))
+            | Event::Start(Tag::HtmlBlock)
+            | Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_) => true,
+            Event::Start(Tag::Link { .. }) => links,
+            _ => false,
+        };
+        if literal && range.start < range.end {
+            ranges.push(range);
+        }
+    }
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Проход по участкам `literal_ranges` с растущими смещениями: каждая
+/// проверка — без пересчёта строки с начала.
+struct Literal {
+    ranges: Vec<Range<usize>>,
+    at: usize,
+}
+
+impl Literal {
+    fn new(ranges: Vec<Range<usize>>) -> Self {
+        Self { ranges, at: 0 }
+    }
+
+    /// Конец участка, внутри которого лежит `pos`. Смещения не убывают.
+    fn covering(&mut self, pos: usize) -> Option<usize> {
+        while self.ranges.get(self.at).is_some_and(|range| range.end <= pos) {
+            self.at += 1;
+        }
+        self.ranges
+            .get(self.at)
+            .filter(|range| range.start <= pos)
+            .map(|range| range.end)
+    }
 }
 
 pub fn canonical_tag(raw: &str) -> Option<String> {
@@ -658,14 +704,12 @@ struct FoundTag {
     end: usize,
 }
 
+/// Тег `#имя` ровно в `index`. Код и HTML отсекает вызывающий по `literal_ranges`.
 fn tag_at(line: &str, index: usize) -> Option<FoundTag> {
     if line.as_bytes().get(index) != Some(&b'#') {
         return None;
     }
     if line[..index].chars().next_back().is_some_and(tag_glue) {
-        return None;
-    }
-    if in_inline_code(line, index) {
         return None;
     }
     let body_start = index + 1;
@@ -682,17 +726,11 @@ fn tag_at(line: &str, index: usize) -> Option<FoundTag> {
     Some(FoundTag { name, end })
 }
 
-fn in_inline_code(line: &str, index: usize) -> bool {
-    line.as_bytes()[..index]
-        .iter()
-        .filter(|byte| **byte == b'`')
-        .count()
-        % 2
-        == 1
-}
-
+/// Знак перед `#`, с которым это не тег: слово (`C#`), адрес (`a.md#x`)
+/// или экранирование (`\#`).
 fn tag_glue(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | '#' | '/' | '.' | ':' | '?' | '&' | '=' | '-')
+    ch.is_alphanumeric()
+        || matches!(ch, '_' | '#' | '/' | '.' | ':' | '?' | '&' | '=' | '-' | '\\')
 }
 
 fn is_tag_char(ch: char) -> bool {
@@ -701,6 +739,10 @@ fn is_tag_char(ch: char) -> bool {
 
 fn tag_body_ok(body: &str) -> bool {
     if body.is_empty() || body.chars().count() > 80 {
+        return false;
+    }
+    // Как в Obsidian: `#123` — номер, а не тег; нужен хотя бы один не цифровой знак.
+    if body.chars().all(|ch| ch.is_numeric() || ch == '/') {
         return false;
     }
     body.split('/').all(|part| {
@@ -1142,6 +1184,47 @@ title: Заметка
             extract_tags(source),
             vec!["альфа".to_string(), "бета".to_string(), "гамма".to_string()]
         );
+    }
+
+    #[test]
+    fn tags_skip_html_indented_code_inline_code_and_numbers() {
+        let source = "\
+Текст #есть и <a href=\"#якорь\">ссылка</a>.
+``код с ` и #внутри`` и `#строчный` и #после
+Номер #123 и #2024/10, но #2024год и #п1.
+[ссылка](#раздел) и [[#Раздел]] и \\#экран
+
+    #отступ в коде
+
+- пункт
+
+    #продолжение пункта
+";
+        assert_eq!(
+            extract_tags(source),
+            vec![
+                "есть".to_string(),
+                "после".to_string(),
+                "2024год".to_string(),
+                "п1".to_string(),
+                "продолжение".to_string(),
+            ]
+        );
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(html.contains(r##"<a href="#якорь">"##));
+        assert!(!html.contains(&format!("tag:{}", encode_path("якорь"))));
+        assert!(html.contains(&format!("tag:{}", encode_path("после"))));
+        assert!(!html.contains(&format!("tag:{}", encode_path("внутри"))));
+        assert!(!html.contains(&format!("tag:{}", encode_path("отступ"))));
+        assert!(!html.contains("tag:123"));
+    }
+
+    #[test]
+    fn long_line_with_many_backticks_and_hashes() {
+        let line = "`код` #тег ".repeat(20_000);
+        assert_eq!(extract_tags(&line), vec!["тег".to_string()]);
+        let html = render_html(&line, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(html.contains(&format!("tag:{}", encode_path("тег"))));
     }
 
     #[test]
