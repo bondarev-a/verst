@@ -267,12 +267,28 @@ fn row_strings(table: &MdTable) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Дополнить строку до числа колонок. Лишние ячейки (их GFM не показывает)
+/// не обрезаем: перестройка таблицы не должна удалять текст из файла.
 fn pad_row(mut row: Vec<String>, cols: usize) -> Vec<String> {
     while row.len() < cols {
         row.push("  ".to_string());
     }
-    row.truncate(cols);
     row
+}
+
+/// Экранировать `|`, набранную в ячейке, чтобы она не делила ячейку.
+/// Уже экранированные `\|` не трогаем.
+pub fn escape_cell_pipes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut backslashes = 0usize;
+    for ch in text.chars() {
+        if ch == '|' && backslashes % 2 == 0 {
+            out.push('\\');
+        }
+        backslashes = if ch == '\\' { backslashes + 1 } else { 0 };
+        out.push(ch);
+    }
+    out
 }
 
 fn write_row(cells: &[String]) -> String {
@@ -360,37 +376,56 @@ impl Building {
     }
 }
 
+/// Строка выравнивания GFM: в каждой ячейке хотя бы один `-`, по краям
+/// может стоять `:`. Подходят и короткие `|-|-|`, `|:-:|`.
 fn is_align_line(line: &str) -> bool {
     let trimmed = line.trim();
-    if !trimmed.contains("---") {
+    let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    if inner.trim().is_empty() || (!trimmed.contains('|') && !trimmed.contains(':')) {
         return false;
     }
-    trimmed
-        .chars()
-        .all(|ch| matches!(ch, '|' | ':' | '-' | ' ' | '\t'))
+    inner.split('|').all(|cell| {
+        let cell = cell.trim();
+        let cell = cell.strip_prefix(':').unwrap_or(cell);
+        let cell = cell.strip_suffix(':').unwrap_or(cell);
+        !cell.is_empty() && cell.chars().all(|ch| ch == '-')
+    })
 }
 
+/// Ячейки строки таблицы по `|`. Экранированная `\|` ячейку не делит
+/// (так в Obsidian пишут `[[заметка\|подпись]]`). Крайние `|` необязательны.
 fn pipe_row_cells(source: &str, line_start: usize, line: &str) -> Vec<TableCell> {
     let line = line.trim_end_matches('\n').trim_end_matches('\r');
     if !line.contains('|') {
         return Vec::new();
     }
+    let lead = line.len() - line.trim_start_matches([' ', '\t']).len();
     let mut cells = Vec::new();
-    let mut i = if line.starts_with('|') { 1 } else { 0 };
+    let mut i = if line[lead..].starts_with('|') { lead + 1 } else { 0 };
     let mut cell_at = line_start + i;
+    let mut escaped = false;
     while i < line.len() {
         let ch = line[i..].chars().next().unwrap();
-        if ch == '|' {
+        if ch == '|' && !escaped {
             cells.push(TableCell {
                 start: cell_at,
                 end: line_start + i,
                 text: source[cell_at..line_start + i].to_string(),
             });
-            i += 1;
-            cell_at = line_start + i;
-        } else {
-            i += ch.len_utf8();
+            cell_at = line_start + i + 1;
         }
+        escaped = ch == '\\' && !escaped;
+        i += ch.len_utf8();
+    }
+    // Последняя ячейка без закрывающей `|`.
+    let tail_end = line_start + line.trim_end().len();
+    if tail_end > cell_at && !source[cell_at..tail_end].trim().is_empty() {
+        cells.push(TableCell {
+            start: cell_at,
+            end: tail_end,
+            text: source[cell_at..tail_end].to_string(),
+        });
     }
     cells
 }
@@ -435,6 +470,60 @@ fn refine_from_pipes(source: &str, table: &mut MdTable) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_without_outer_pipes_keep_all_columns() {
+        let src = "a | b\n--|--\n1 | 2\n";
+        let table = &parse_tables(src)[0];
+        assert_eq!(table.column_count(), 2);
+        assert_eq!(table.cell(1, 1).unwrap().text.trim(), "2");
+        let grown = add_row(src, 0).unwrap();
+        assert!(grown.contains("| 1 | 2|") || grown.contains("1 | 2"), "{grown}");
+        let again = &parse_tables(&grown)[0];
+        assert_eq!(again.column_count(), 2);
+        assert_eq!(again.cell(1, 1).unwrap().text.trim(), "2");
+    }
+
+    #[test]
+    fn escaped_pipe_stays_inside_cell() {
+        let src = "| ссылка | x |\n| --- | --- |\n| [[заметка\\|подпись]] | 2 |\n";
+        let table = &parse_tables(src)[0];
+        assert_eq!(table.column_count(), 2);
+        assert_eq!(table.cell(1, 0).unwrap().text.trim(), "[[заметка\\|подпись]]");
+        assert_eq!(table.cell(1, 1).unwrap().text.trim(), "2");
+        let wide = insert_column_at(src, 0, 2).unwrap();
+        assert!(wide.contains("[[заметка\\|подпись]]"), "{wide}");
+        assert!(wide.contains("| 2 |"), "{wide}");
+    }
+
+    #[test]
+    fn short_alignment_line_is_recognised() {
+        assert!(is_align_line("|-|-|"));
+        assert!(is_align_line("| :-: | -: |"));
+        assert!(is_align_line("--|--"));
+        assert!(!is_align_line("| a | - |"));
+        assert!(!is_align_line("| |"));
+        let src = "| a | b |\n|-|-|\n| 1 | 2 |\n";
+        let table = &parse_tables(src)[0];
+        assert_eq!(table.row_count(), 2);
+        let out = replace_cell(src, 0, 1, 0, " X ").unwrap();
+        assert!(out.contains("|-|-|"), "{out}");
+        assert!(out.contains("| X | 2 |"), "{out}");
+    }
+
+    #[test]
+    fn extra_cells_are_not_dropped() {
+        let src = "| a | b |\n| --- | --- |\n| 1 | 2 | лишнее |\n";
+        let out = add_row(src, 0).unwrap();
+        assert!(out.contains("лишнее"), "{out}");
+    }
+
+    #[test]
+    fn typed_pipe_is_escaped_once() {
+        assert_eq!(escape_cell_pipes("a|b"), "a\\|b");
+        assert_eq!(escape_cell_pipes("a\\|b"), "a\\|b");
+        assert_eq!(escape_cell_pipes("a\\\\|b"), "a\\\\\\|b");
+    }
 
     fn sample() -> &'static str {
         "| Name | Qty |\n| --- | ---: |\n| apples | 3 |\n| **tea** | 1 |\n"

@@ -1156,7 +1156,8 @@ impl Ctx {
         let Some(entry) = self.table_entry(table, row, col) else {
             return;
         };
-        self.commit_table_cell(path, table, row, col, format!(" {} ", entry.text()));
+        let text = tables::escape_cell_pipes(&entry.text());
+        self.commit_table_cell(path, table, row, col, format!(" {text} "));
     }
 
     fn table_entry(&self, table: usize, row: usize, col: usize) -> Option<gtk4::Entry> {
