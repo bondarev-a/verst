@@ -22,7 +22,15 @@ pub struct RawLink {
     pub line: usize,
 }
 
+/// Без метки порядка байтов (U+FEFF) в начале. Её оставляют редакторы
+/// Windows; с ней первая строка `# Заголовок` или `---` не узнаётся.
+/// Сам файл не меняется: метка снимается только при разборе.
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 pub fn headings(source: &str) -> Vec<Heading> {
+    let source = strip_bom(source);
     let mut out = Vec::new();
     let mut in_fence = false;
     // Строки шапки YAML пропускаются: `# комментарий` в ней не заголовок.
@@ -61,6 +69,7 @@ pub fn headings(source: &str) -> Vec<Heading> {
 }
 
 pub fn extract_links(source: &str) -> Vec<RawLink> {
+    let source = strip_bom(source);
     let mut out = Vec::new();
     let mut in_fence = false;
     for (line_index, raw) in source.lines().enumerate() {
@@ -229,6 +238,7 @@ pub fn render_html(
     href: &impl Fn(LocalLink) -> String,
     missing_prefix: &str,
 ) -> String {
+    let source = strip_bom(source);
     let rewritten = rewrite_wikilinks(source, pin, files, href);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -502,6 +512,7 @@ fn push_tag(tags: &mut Vec<String>, tag: String) {
 }
 
 fn split_frontmatter(source: &str) -> (Option<&str>, &str) {
+    let source = strip_bom(source);
     let Some(rest) = source.strip_prefix("---") else {
         return (None, source);
     };
@@ -1016,6 +1027,25 @@ title: Заметка
         assert_eq!(found[0].text, "Заголовок");
         assert_eq!(found[0].line, 4);
         assert_eq!(extract_tags(source), vec!["проект".to_string()]);
+    }
+
+    #[test]
+    fn bom_does_not_hide_heading_or_frontmatter() {
+        let source = "\u{feff}# Заголовок\nтекст #тег\n";
+        let found = headings(source);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "Заголовок");
+        assert_eq!(found[0].line, 0);
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(html.contains("<h1>Заголовок</h1>"));
+        let source = "\u{feff}---\ntags: [проект]\n---\n# Тема\n";
+        let (front, body) = split_frontmatter(source);
+        assert_eq!(front, Some("---\ntags: [проект]\n---\n"));
+        assert_eq!(body, "# Тема\n");
+        assert_eq!(extract_tags(source), vec!["проект".to_string()]);
+        assert_eq!(headings(source)[0].line, 3);
+        let html = render_html(source, Path::new("/repo/index.md"), None, &[], &href, "");
+        assert!(!html.contains("<hr"));
     }
 
     #[test]

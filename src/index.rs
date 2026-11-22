@@ -158,7 +158,8 @@ pub fn build_index(pin: &Path) -> LinkIndex {
         let Ok(text) = fs::read_to_string(file) else {
             continue;
         };
-        let targets = outgoing_targets(&text, file, pin, &files);
+        let text = markdown::strip_bom(&text);
+        let targets = outgoing_targets(text, file, pin, &files);
         for target in &targets {
             incoming
                 .entry(target.clone())
@@ -168,7 +169,7 @@ pub fn build_index(pin: &Path) -> LinkIndex {
         if !targets.is_empty() {
             outgoing.insert(file.clone(), targets);
         }
-        let tags = markdown::extract_tags(&text);
+        let tags = markdown::extract_tags(text);
         if !tags.is_empty() {
             for tag in &tags {
                 tag_files.entry(tag.clone()).or_default().push(file.clone());
@@ -541,8 +542,13 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("c.md"), "тоже #общая\n").unwrap();
+        fs::write(root.join("d.md"), "\u{feff}---\ntags: [общая]\n---\n[[c]]\n").unwrap();
         let index = build_index(&root);
-        assert_eq!(index.files_with_tag("общая").len(), 2);
+        assert_eq!(index.files_with_tag("общая").len(), 3);
+        assert!(index
+            .outgoing_of(&root.join("d.md"))
+            .iter()
+            .any(|path| path.ends_with("c.md")));
         assert_eq!(index.files_with_tag("уникальная").len(), 1);
         assert!(index.files_with_tag("заголовок").is_empty());
         let _ = fs::remove_dir_all(&root);

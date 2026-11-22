@@ -66,6 +66,21 @@ enum Frame {
 
 /// Смещения по исходному тексту, без переписывания вики-ссылок.
 pub fn mark_spans(source: &str) -> Vec<MarkSpan> {
+    // Метка порядка байтов остаётся в буфере редактора, но мешает разбору
+    // первой строки. Разбираем текст без неё и сдвигаем смещения обратно.
+    let text = crate::markdown::strip_bom(source);
+    let bom = source.len() - text.len();
+    let mut out = spans_of(text);
+    if bom > 0 {
+        for span in &mut out {
+            span.start += bom;
+            span.end += bom;
+        }
+    }
+    out
+}
+
+fn spans_of(source: &str) -> Vec<MarkSpan> {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -486,6 +501,24 @@ mod tests {
             .unwrap();
         assert_eq!(block.start, 0);
         assert!(source[block.start..block.end].contains("tags: [проект]"));
+    }
+
+    #[test]
+    fn bom_keeps_heading_and_offsets() {
+        let source = "\u{feff}# Заголовок\n[[Заметка]]\n";
+        let spans = mark_spans(source);
+        let heading = spans
+            .iter()
+            .find(|s| matches!(s.kind, MarkKind::Heading { level: 1 }))
+            .unwrap();
+        assert_eq!(&source[heading.start..heading.end], "# Заголовок\n");
+        let mark = spans.iter().find(|s| s.kind == MarkKind::HeadingMark).unwrap();
+        assert_eq!(&source[mark.start..mark.end], "# ");
+        let link = spans
+            .iter()
+            .find(|s| matches!(s.kind, MarkKind::WikiLink { .. }))
+            .unwrap();
+        assert_eq!(&source[link.start..link.end], "[[Заметка]]");
     }
 
     #[test]
