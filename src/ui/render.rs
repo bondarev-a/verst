@@ -1677,6 +1677,11 @@ impl Ctx {
     fn recover_table_cover(&self, buffer: &sourceview5::Buffer) {
     let _prof = crate::ui::prof::span("recover_table_cover");
         let text = buffer_text_of(buffer);
+        // Правка ячейки меняет длину исходника таблицы, а границы живых
+        // таблиц до следующей полной перерисовки оставались старыми: тег,
+        // прячущий исходник, ложился на старый диапазон, и при переходе Tab
+        // в другую ячейку пряталось начало следующего абзаца.
+        self.sync_live_table_bounds(&text);
         let tables: Vec<(usize, usize)> = self
             .state
             .borrow()
@@ -1710,6 +1715,21 @@ impl Ctx {
         }
         for anchor in &image_anchors {
             lift_anchor_scale(buffer, anchor);
+        }
+    }
+
+    fn sync_live_table_bounds(&self, text: &str) {
+        let parsed = tables::parse_tables(text);
+        let mut state = self.state.borrow_mut();
+        if state.render.tables.len() != parsed.len() {
+            return;
+        }
+        for (live, table) in state.render.tables.iter_mut().zip(parsed.iter()) {
+            live.start = table.start;
+            live.end = table.end;
+            live.start_line = newline_count(slice_bytes(text, 0, table.start));
+            let end_line = newline_count(slice_bytes(text, 0, table.end));
+            live.end_line = end_line.max(live.start_line + 1);
         }
     }
 

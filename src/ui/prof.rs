@@ -239,6 +239,9 @@ enum Step {
     /// Вставить несколько строк разом (как Ctrl+V) и проверить оформление
     /// вставленных строк вне строки курсора.
     PasteCheck,
+    /// Длинный текст в ячейку первой таблицы, переход в другую ячейку:
+    /// строка после таблицы должна остаться видимой.
+    CellTab,
     Quit,
 }
 
@@ -338,6 +341,10 @@ fn start_bench(ctx: Ctx) {
             steps.push(Step::Go(paths[0].clone(), 0));
             steps.push(Step::UndoAfterSwitch(paths[0].clone(), 1));
         }
+    }
+    if let Some(file) = std::env::var_os("VERST_BENCH_CELL_TAB") {
+        steps.push(Step::Go(std::path::PathBuf::from(file), 0));
+        steps.push(Step::CellTab);
     }
     if let Some(file) = std::env::var_os("VERST_BENCH_PASTE") {
         steps.push(Step::Go(std::path::PathBuf::from(file), 0));
@@ -774,6 +781,42 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     );
                     run_steps(ctx, steps);
                 });
+            });
+        }
+        Step::CellTab => {
+            let Some(path) = ctx.focused_path() else {
+                run_steps(ctx, steps);
+                return;
+            };
+            ctx.bench_caret_in_cell(0, 1, 0);
+            let fill = std::env::var("VERST_BENCH_CELL_TEXT").unwrap_or_default();
+            let typed = ctx.bench_type_in_cell(&fill);
+            ctx.bench_caret_in_cell(0, 1, 1);
+            glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                let buffer = ctx.focused_view().buffer();
+                let text = ctx.buffer_text(&path).unwrap_or_default();
+                let tables = text_workspace::tables::parse_tables(&text);
+                let after = tables.first().map_or(0, |t| text[..t.end].matches('\n').count());
+                // Первая непустая строка после таблицы.
+                let mut line = after as i32;
+                let mut info = String::from("нет строки");
+                while line < buffer.line_count() {
+                    let Some(start) = buffer.iter_at_line(line) else { break };
+                    let mut end = start;
+                    end.forward_to_line_end();
+                    let shown = buffer.text(&start, &end, true);
+                    if !shown.trim().is_empty() && !shown.starts_with('|') {
+                        let hidden = start.tags().iter().any(|t| {
+                            matches!(t.name().as_deref(), Some("tw-table") | Some("tw-hide"))
+                        });
+                        let head: String = shown.chars().take(20).collect();
+                        info = format!("line {line} {head:?} hidden {hidden}");
+                        break;
+                    }
+                    line += 1;
+                }
+                eprintln!("PROF cell_tab: typed {typed}, cell_active {}, after table: {info}", ctx.any_table_cell_focused());
+                run_steps(ctx, steps);
             });
         }
         Step::PasteCheck => {
