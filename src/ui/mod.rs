@@ -269,6 +269,8 @@ pub(super) struct State {
     preview_expect: Option<String>,
     /// JavaScript, разрешённый текущей странице предпросмотра (только PDF).
     preview_js: bool,
+    /// Флаг остановки текущего поиска по пространству.
+    search_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     side_tick: u64,
     /// Растёт, когда меняется то, от чего зависят ссылки: индекс, граф
     /// чужого пина, активный пин. Кеши ссылок с другим значением устарели.
@@ -1183,6 +1185,7 @@ impl Ctx {
                 side_shown: Default::default(),
                 preview_expect: None,
                 preview_js: false,
+                search_stop: None,
                 side_tick: 0,
                 links_gen: 0,
             })),
@@ -3991,10 +3994,18 @@ impl Ctx {
             self.set_status("Поиск доступен внутри запиненного каталога");
             return;
         };
+        // Прежний обход больше не нужен: каждая пауза в наборе запускала
+        // новый полный обход пространства, а старые шли до конца.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Some(old) = self.state.borrow_mut().search_stop.replace(stop.clone()) {
+            old.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let hits = index::search_pin(&pin, &query, 200);
-            let _ = sender.send((query, hits));
+            let hits = index::search_pin_until(&pin, &query, 200, &stop);
+            if !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = sender.send((query, hits));
+            }
         });
         let ctx = self.clone();
         glib::timeout_add_local(Duration::from_millis(150), move || {

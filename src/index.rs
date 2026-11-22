@@ -423,6 +423,18 @@ pub fn list_text_files(pin: &Path) -> Vec<PathBuf> {
 }
 
 pub fn search_pin(pin: &Path, query: &str, limit: usize) -> Vec<SearchHit> {
+    search_pin_until(pin, query, limit, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// Поиск, который бросается, как только `stop` станет true: новый набор в
+/// поле поиска отменяет прежний обход, а не ждёт его конца.
+pub fn search_pin_until(
+    pin: &Path,
+    query: &str,
+    limit: usize,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Vec<SearchHit> {
+    use std::sync::atomic::Ordering;
     let query = query.trim();
     if query.is_empty() || limit == 0 {
         return Vec::new();
@@ -431,7 +443,7 @@ pub fn search_pin(pin: &Path, query: &str, limit: usize) -> Vec<SearchHit> {
     let mut hits = Vec::new();
     let mut stack = vec![pin.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if hits.len() >= limit {
+        if hits.len() >= limit || stop.load(Ordering::Relaxed) {
             break;
         }
         let entries = match fs::read_dir(&dir) {
@@ -439,7 +451,7 @@ pub fn search_pin(pin: &Path, query: &str, limit: usize) -> Vec<SearchHit> {
             Err(_) => continue,
         };
         for entry in entries.flatten() {
-            if hits.len() >= limit {
+            if hits.len() >= limit || stop.load(Ordering::Relaxed) {
                 break;
             }
             let name = entry.file_name();
@@ -505,6 +517,18 @@ fn searchable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_search_returns_nothing() {
+        let dir = std::env::temp_dir().join(format!("verst_stop_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("а.md"), "искомое слово").unwrap();
+        let go = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(search_pin_until(&dir, "искомое", 10, &go).len(), 1);
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        assert!(search_pin_until(&dir, "искомое", 10, &stop).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn index_connects_markdown_and_wiki() {
