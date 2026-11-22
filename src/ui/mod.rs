@@ -2638,7 +2638,11 @@ impl Ctx {
         self.refresh_outline();
         self.refresh_file_facts();
         if !self.state.borrow().loading {
-            self.refresh_preview_now();
+            // В режиме «Просмотр» страницу строит apply_view_mode ниже;
+            // раньше Markdown разбирался и грузился в WebKit дважды.
+            if !self.preview_page_shown() {
+                self.refresh_preview_now();
+            }
             self.refresh_side_panels();
         }
         self.refresh_open_list();
@@ -2880,11 +2884,7 @@ impl Ctx {
             return;
         }
         let mode = self.state.borrow().view_mode;
-        let show_preview = mode == ViewMode::Preview
-            && path.as_ref().is_some_and(|path| {
-                is_markdown(path)
-                    || matches!(kind::shown(path), kind::Shown::Html | kind::Shown::Svg)
-            });
+        let show_preview = self.preview_page_shown();
         let editable = mode == ViewMode::Edit && !self.any_table_cell_focused();
         for view in &self.widgets.views {
             view.set_editable(editable);
@@ -2899,6 +2899,22 @@ impl Ctx {
         }
         self.apply_render_mode_chrome();
         self.sync_ask_chip();
+    }
+
+    /// apply_view_mode покажет и сам построит страницу предпросмотра.
+    fn preview_page_shown(&self) -> bool {
+        if self.state.borrow().browsing {
+            return false;
+        }
+        let Some(path) = self.focused_path() else {
+            return false;
+        };
+        if kind::is_view_only(&path) {
+            return false;
+        }
+        self.state.borrow().view_mode == ViewMode::Preview
+            && (is_markdown(&path)
+                || matches!(kind::shown(&path), kind::Shown::Html | kind::Shown::Svg))
     }
 
     fn sync_view_dropdown(&self) {

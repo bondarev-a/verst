@@ -229,13 +229,21 @@ pub fn render_html(
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    // Номер строки события — двоичным поиском по началам строк. Подсчёт `\n`
+    // с начала файла на каждое событие был квадратичным: 200 мс на 200 КБ.
+    let newlines: Vec<usize> = rewritten
+        .bytes()
+        .enumerate()
+        .filter(|(_, byte)| *byte == b'\n')
+        .map(|(index, _)| index)
+        .collect();
     let parser = Parser::new_ext(&rewritten, options).into_offset_iter();
     let mut events = Vec::new();
     let mut seen_line = None;
     let mut in_code = false;
     for (event, range) in parser {
         let event = rewrite_link_event(event, from, href);
-        let line = line_at_byte(&rewritten, range.start);
+        let line = newlines.partition_point(|at| *at < range.start);
         if !in_code && seen_line != Some(line) {
             events.push(Event::Html(CowStr::from(format!(
                 r#"<span id="twl{line}"></span>"#
@@ -281,6 +289,7 @@ pub fn render_html(
     )
 }
 
+#[cfg(test)]
 fn line_at_byte(source: &str, byte: usize) -> usize {
     let end = byte.min(source.len());
     source[..end].bytes().filter(|byte| *byte == b'\n').count()
@@ -807,6 +816,20 @@ fn strip_remote_images(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_lookup_matches_counting() {
+        let text = "# Заголовок\n\nабзац\r\nещё\n\n| а | б |\n|---|---|\n| 1 | 2 |\nконец";
+        let newlines: Vec<usize> = text
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(index, _)| index)
+            .collect();
+        for byte in (0..=text.len()).filter(|b| text.is_char_boundary(*b)) {
+            assert_eq!(newlines.partition_point(|at| *at < byte), line_at_byte(text, byte));
+        }
+    }
 
     #[test]
     fn heading_slug_keeps_numbers_and_words() {
