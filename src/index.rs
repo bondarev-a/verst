@@ -20,11 +20,6 @@ const MAX_MD_FILES: usize = 20_000;
 const MAX_SEARCH_BYTES: u64 = 512 * 1024;
 /// Больше редактор не открывает; такой файл и в индекс ссылок не читается.
 const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
-const BINARY_EXT: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "gz", "tgz", "bz2", "xz", "7z", "o",
-    "a", "so", "dylib", "wasm", "mp3", "mp4", "ttf", "otf", "woff", "woff2", "class", "jar",
-    "sqlite", "db",
-];
 
 #[derive(Debug, Clone, Default)]
 pub struct LinkIndex {
@@ -413,23 +408,13 @@ pub fn list_text_files(pin: &Path) -> Vec<PathBuf> {
                     continue;
                 }
                 stack.push(path);
-            } else if file_type.is_file() && !is_binary_name(&path) {
+            } else if file_type.is_file() && !crate::kind::is_binary(&path) {
                 files.push(path);
             }
         }
     }
     files.sort();
     files
-}
-
-fn is_binary_name(path: &Path) -> bool {
-    if crate::kind::is_view_only(path) {
-        return true;
-    }
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .is_some_and(|ext| BINARY_EXT.contains(&ext.as_str()))
 }
 
 pub fn search_pin(pin: &Path, query: &str, limit: usize) -> Vec<SearchHit> {
@@ -509,17 +494,7 @@ fn searchable(path: &Path) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
-    if !meta.is_file() || meta.len() > MAX_SEARCH_BYTES {
-        return false;
-    }
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-    {
-        Some(ext) if BINARY_EXT.iter().any(|item| *item == ext) => false,
-        _ => true,
-    }
+    meta.is_file() && meta.len() <= MAX_SEARCH_BYTES && !crate::kind::is_binary(path)
 }
 
 #[cfg(test)]
