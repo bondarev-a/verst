@@ -73,6 +73,8 @@ pub(super) struct RenderState {
     cursor_suspend: bool,
     /// Рендер отложен, пока текстовое поле ещё не показано.
     wait_realize: bool,
+    /// Высота курсора ячейки для размера текста: (text_pt, пиксели).
+    caret_px: Option<(i32, i32)>,
 }
 
 #[derive(Clone)]
@@ -339,6 +341,53 @@ impl Ctx {
         format!("tag_table {} | {}", buffer.tag_table().size(), out.join(" || "))
     }
 
+    /// Высота курсора ячейки. Считается один раз на размер текста.
+    pub(super) fn cell_caret_height(&self, entry: &gtk4::Entry) -> i32 {
+        let pt = self.state.borrow().session.text_pt;
+        if let Some((cached_pt, px)) = self.state.borrow().render.caret_px {
+            if cached_pt == pt {
+                return px;
+            }
+        }
+        let px = measure_line_height(entry, pt);
+        self.state.borrow_mut().render.caret_px = Some((pt, px));
+        px
+    }
+
+    /// Масштаб текста изменился: новая высота у уже созданных курсоров.
+    pub(super) fn resize_cell_carets(&self) {
+        let grids: Vec<gtk4::Grid> = self
+            .state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .flat_map(|table| table.grids.iter().flatten().cloned())
+            .collect();
+        for grid in grids {
+            let mut child = grid.first_child();
+            while let Some(cell) = child {
+                child = cell.next_sibling();
+                let Some(entry) = cell_entry_of(&cell) else {
+                    continue;
+                };
+                let Some(bar) = cell
+                    .clone()
+                    .downcast::<gtk4::Overlay>()
+                    .ok()
+                    .and_then(|overlay| overlay_caret_bar(&overlay))
+                    .and_then(|bar| bar.downcast::<gtk4::DrawingArea>().ok())
+                else {
+                    continue;
+                };
+                let px = self.cell_caret_height(&entry);
+                if bar.content_height() != px {
+                    bar.set_content_height(px);
+                }
+            }
+        }
+    }
+
     /// Для замеров: сделать ячейку активной и вернуть высоту курсора, высоту
     /// строки шрифта поля и высоту ячейки.
     pub(super) fn bench_caret_in_cell(&self, table: usize, row: usize, col: usize) {
@@ -357,8 +406,8 @@ impl Ctx {
         };
         let bar = overlay_caret_bar(&overlay).map(|b| b.height()).unwrap_or(-1);
         format!(
-            "ячейка ({row},{col}): курсор {bar} px, строка шрифта {} px, ячейка {} px",
-            cell_line_height(&entry),
+            "ячейка ({row},{col}): курсор {bar} px, строка поля {} px, ячейка {} px",
+            entry.create_pango_layout(Some("Ag")).pixel_size().1,
             overlay.height()
         )
     }
@@ -1068,13 +1117,6 @@ impl Ctx {
             return;
         };
         let caret = self.state.borrow().render.cell_caret;
-        // Масштаб текста мог измениться с прошлого показа.
-        if let Ok(area) = bar.clone().downcast::<gtk4::DrawingArea>() {
-            let line = cell_line_height(entry);
-            if area.content_height() != line {
-                area.set_content_height(line);
-            }
-        }
         bar.set_visible(true);
         // Текст шире ячейки поле ввода прокручивает, и курсор у правого края.
         // Без ограничения нарисованный курсор уезжал в соседнюю ячейку.
@@ -2131,7 +2173,7 @@ fn ensure_cell_entry(
     // таблицы разной высоты, и курсор растягивался на всю ячейку.
     // По центру, как и однострочное поле ввода (valign Center).
     bar.set_valign(gtk4::Align::Center);
-    bar.set_content_height(cell_line_height(&entry));
+    bar.set_content_height(ctx.cell_caret_height(&entry));
     bar.set_can_target(false);
     bar.set_can_focus(false);
     bar.set_sensitive(false);
@@ -2797,9 +2839,17 @@ fn mark_cell_active(widget: &gtk4::Widget) {
     }
 }
 
-/// Высота строки шрифта поля ввода, в пикселях.
-fn cell_line_height(entry: &gtk4::Entry) -> i32 {
-    entry.create_pango_layout(Some("Ag")).pixel_size().1.max(1)
+/// Высота строки шрифта ячейки при размере текста `pt`, в пикселях.
+/// Размер берётся из настроек, а не из стиля поля: сразу после смены
+/// масштаба новый CSS к полю ещё не применён.
+fn measure_line_height(entry: &gtk4::Entry, pt: i32) -> i32 {
+    let context = entry.pango_context();
+    let mut font = context.font_description().unwrap_or_default();
+    font.set_size(zoom::clamp_pt(pt) * pango::SCALE);
+    let layout = pango::Layout::new(&context);
+    layout.set_font_description(Some(&font));
+    layout.set_text("Ag");
+    layout.pixel_size().1.max(1)
 }
 
 fn cell_caret_pixel_x(entry: &gtk4::Entry, index: i32) -> i32 {

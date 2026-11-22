@@ -2578,6 +2578,8 @@ impl Ctx {
         self.widgets.preview.set_zoom_level(zoom::webkit_factor(pt));
         self.apply_text_zoom_tags();
         self.sync_table_grid_widths();
+        // Высота курсора в ячейках привязана к размеру текста.
+        self.resize_cell_carets();
         assign_spin(&self.widgets.bar_text_spin, pt);
         if let Some(spin) = self.widgets.text_spin.borrow().clone() {
             assign_spin(&spin, pt);
