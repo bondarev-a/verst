@@ -377,7 +377,7 @@ impl Ctx {
             .default_width(420)
             .build();
         dialog.add_css_class("prompt-dialog");
-        let text = gtk4::Label::new(Some(&format!("Удалить «{label}»? Файл исчезнет с диска.")));
+        let text = gtk4::Label::new(Some(&format!("Удалить «{label}»? Заметка будет перемещена в корзину.")));
         text.set_wrap(true);
         text.set_halign(gtk4::Align::Start);
         text.set_margin_bottom(12);
@@ -408,7 +408,7 @@ impl Ctx {
         dialog.present();
     }
 
-    fn delete_note(&self, path: &Path) {
+    pub(super) fn delete_note(&self, path: &Path) {
         if !notes::is_inbox(path) {
             self.set_status("Это не быстрая заметка");
             return;
@@ -431,12 +431,21 @@ impl Ctx {
         if opened && !self.close_file(path) {
             return;
         }
-        if let Err(error) = fs::remove_file(path) {
-            self.set_status(&format!("Не удалось удалить заметку: {error}"));
+        // В корзину, а не безвозвратно: случайное удаление можно отменить.
+        let trashed = gio::File::for_path(path).trash(None::<&gio::Cancellable>);
+        if let Err(trash_error) = trashed {
+            if let Err(error) = fs::remove_file(path) {
+                self.set_status(&format!(
+                    "Не удалось удалить заметку: {error} (корзина: {trash_error})"
+                ));
+                return;
+            }
+            self.refresh_notes();
+            self.set_status("Корзина недоступна: заметка удалена безвозвратно");
             return;
         }
         self.refresh_notes();
-        self.set_status("Заметка удалена");
+        self.set_status("Заметка перемещена в корзину");
     }
 
     pub(super) fn move_note_to_workspace(&self, path: &Path) {
@@ -639,6 +648,8 @@ impl Ctx {
                 mode.path = to.to_path_buf();
             }
         }
+        // Раньше «Назад» после переноса заметки вёл на её старый путь.
+        state.nav.retarget(from, to);
     }
 
     /// Подпись и теги заметки. Открытая заметка — по тексту в редакторе,
@@ -827,7 +838,7 @@ fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     match fs::rename(from, to) {
         Ok(()) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(18) => {
+        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
             fs::copy(from, to)?;
             fs::remove_file(from)
         }

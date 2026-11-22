@@ -47,6 +47,17 @@ impl NavHistory {
         Some(dest)
     }
 
+    /// Файл перенесён или переименован: «Назад» и «Вперёд» ведут на новый путь.
+    pub fn retarget(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        for place in self.back.iter_mut().chain(self.forward.iter_mut()) {
+            if let NavPlace::File { path, .. } = place {
+                if path == from {
+                    *path = to.to_path_buf();
+                }
+            }
+        }
+    }
+
     pub fn forward(&mut self, here: Option<NavPlace>) -> Option<NavPlace> {
         let dest = self.forward.pop()?;
         if let Some(here) = here {
@@ -75,6 +86,22 @@ pub fn toggle_pin(pins: &mut Vec<PathBuf>, path: PathBuf) -> bool {
 pub fn dedupe(files: &mut Vec<PathBuf>) {
     let mut seen = HashSet::new();
     files.retain(|path| seen.insert(path.clone()));
+}
+
+#[cfg(test)]
+mod retarget_tests {
+    use super::*;
+
+    #[test]
+    fn retarget_rewrites_back_and_forward() {
+        let file = |p: &str| NavPlace::File { path: PathBuf::from(p), line: 3, preview: false };
+        let mut nav = NavHistory::default();
+        nav.leave(file("/заметки/а.md"));
+        nav.leave(file("/б.md"));
+        let _ = nav.back(Some(file("/в.md")));
+        nav.retarget(std::path::Path::new("/заметки/а.md"), std::path::Path::new("/пр/а.md"));
+        assert_eq!(nav.back(None), Some(file("/пр/а.md")));
+    }
 }
 
 #[cfg(test)]
