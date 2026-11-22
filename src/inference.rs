@@ -202,6 +202,8 @@ pub enum AskFail {
     NoModel,
     NoKey { env: String },
     TooLong { limit: usize },
+    /// Ключ ушёл бы по сети открытым текстом.
+    Insecure,
 }
 
 impl std::fmt::Display for AskFail {
@@ -215,6 +217,11 @@ impl std::fmt::Display for AskFail {
             Self::NoKey { env } => {
                 write!(f, "Нет ключа. Впишите его в настройках или задайте {env}")
             }
+            Self::Insecure => write!(
+                f,
+                "Адрес инференса без https: ключ ушёл бы открытым текстом. \
+                 Укажите https:// (http:// — только для localhost)"
+            ),
             Self::TooLong { limit } => {
                 write!(f, "Выделение длиннее {limit} знаков")
             }
@@ -239,6 +246,9 @@ pub fn chat_url(provider: Provider, base_url: &str) -> Result<String, AskFail> {
     if base.is_empty() {
         return Err(AskFail::NoAddress);
     }
+    if !transport_is_safe(base) {
+        return Err(AskFail::Insecure);
+    }
     match provider {
         Provider::OpenaiCompatible => Ok(format!("{base}/chat/completions")),
         Provider::Anthropic => {
@@ -247,6 +257,29 @@ pub fn chat_url(provider: Provider, base_url: &str) -> Result<String, AskFail> {
         }
         Provider::None => Err(AskFail::ProviderOff),
     }
+}
+
+/// В запросе всегда уходит ключ. По http:// он виден всем на пути до сервера,
+/// поэтому http разрешён только для своей машины (локальная модель).
+fn transport_is_safe(base: &str) -> bool {
+    let lower = base.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = lower.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = if let Some(inner) = host_port.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "::1"
+        || host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 pub fn request_body(
@@ -578,6 +611,24 @@ mod tests {
         assert!(!user.contains('/'));
         assert_eq!(prepared.body["model"], "demo-model");
         assert_eq!(prepared.url, "https://example.test/v1/chat/completions");
+    }
+
+    #[test]
+    fn key_is_not_sent_over_plain_http() {
+        assert!(transport_is_safe("https://api.example.test/v1"));
+        assert!(transport_is_safe("HTTPS://api.example.test"));
+        assert!(transport_is_safe("http://localhost:11434/v1"));
+        assert!(transport_is_safe("http://127.0.0.1:8080"));
+        assert!(transport_is_safe("http://[::1]:8080/v1"));
+        assert!(!transport_is_safe("http://api.example.test/v1"));
+        assert!(!transport_is_safe("http://192.168.1.5:11434"));
+        assert!(!transport_is_safe("http://localhost.evil.test"));
+        assert!(!transport_is_safe("http://127.0.0.1@evil.test"));
+        assert!(!transport_is_safe("ftp://example.test"));
+        assert!(matches!(
+            chat_url(Provider::OpenaiCompatible, "http://api.example.test/v1"),
+            Err(AskFail::Insecure)
+        ));
     }
 
     #[test]
