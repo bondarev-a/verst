@@ -15,7 +15,7 @@ static MAIN_START: OnceLock<Instant> = OnceLock::new();
 
 thread_local! {
     static ON: bool = std::env::var_os("VERST_PROF").is_some();
-    static TOTALS: RefCell<BTreeMap<&'static str, (Duration, u32)>> = RefCell::new(BTreeMap::new());
+    static TOTALS: RefCell<BTreeMap<&'static str, (Duration, u32)>> = const { RefCell::new(BTreeMap::new()) };
     static STALL: RefCell<Stall> = RefCell::new(Stall::default());
     static FIRST_PAINT: Cell<bool> = const { Cell::new(false) };
 }
@@ -275,7 +275,10 @@ fn start_bench(ctx: Ctx) {
         for file in &files {
             steps.push(Step::Go(file.clone(), round));
             if shots {
-                let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name = file
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 steps.push(Step::Shot(name));
             }
         }
@@ -440,7 +443,11 @@ fn start_bench(ctx: Ctx) {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
-        for _ in 0..std::env::var("VERST_BENCH_TYPE_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1usize) {
+        for _ in 0..std::env::var("VERST_BENCH_TYPE_REPEAT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1usize)
+        {
             steps.push(Step::Type(count));
             steps.push(Step::Report("typing".to_string()));
         }
@@ -489,7 +496,7 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     eprintln!("PROF markup {}", ctx.markup_report());
                 }
                 if round == 1 {
-                    save_shot(&ctx, &format!("{name}"));
+                    save_shot(&ctx, &name.to_string());
                 }
                 run_steps(ctx, steps);
             });
@@ -524,7 +531,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             glib::timeout_add_local_once(Duration::from_millis(700), move || {
                 eprintln!("PROF caret {}", ctx.bench_caret_report());
                 save_shot(&ctx, &format!("caret-{row}-{col}"));
-                glib::timeout_add_local_once(Duration::from_millis(500), move || run_steps(ctx, steps));
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    run_steps(ctx, steps)
+                });
             });
         }
         Step::Drag(nav, info) => {
@@ -586,7 +595,10 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     ctx.widgets.view_toggle.icon_name().unwrap_or_default(),
                     ctx.lists_report()
                 );
-                save_shot(&ctx, &format!("action-{name}-{}", ctx.state.borrow().view_mode.as_str()));
+                save_shot(
+                    &ctx,
+                    &format!("action-{name}-{}", ctx.state.borrow().view_mode.as_str()),
+                );
                 run_steps(ctx, steps);
             });
         }
@@ -605,7 +617,7 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 }
                 2 => {
                     if let Some(mut a) = buffer.iter_at_line(2) {
-                        let mut b = a.clone();
+                        let mut b = a;
                         b.forward_chars(marker.chars().count() as i32);
                         if buffer.text(&a, &b, true) == marker {
                             buffer.delete(&mut a, &mut b);
@@ -624,8 +636,10 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             let buffer = view.buffer();
             let mut line = 0;
             while line < buffer.line_count() {
-                let Some(start) = buffer.iter_at_line(line) else { break };
-                let mut end = start.clone();
+                let Some(start) = buffer.iter_at_line(line) else {
+                    break;
+                };
+                let mut end = start;
                 end.forward_to_line_end();
                 if buffer.text(&start, &end, true).starts_with("| ") {
                     break;
@@ -640,8 +654,14 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             ctx.go(next.clone(), None);
             glib::timeout_add_local_once(Duration::from_millis(1200), move || {
                 let editable = ctx.focused_view().is_editable();
-                let here = ctx.focused_path().and_then(|p| ctx.buffer_text(&p)).unwrap_or_default();
-                let there = from.as_ref().and_then(|p| ctx.buffer_text(p)).unwrap_or_default();
+                let here = ctx
+                    .focused_path()
+                    .and_then(|p| ctx.buffer_text(&p))
+                    .unwrap_or_default();
+                let there = from
+                    .as_ref()
+                    .and_then(|p| ctx.buffer_text(p))
+                    .unwrap_or_default();
                 let disk = from
                     .as_ref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
@@ -662,8 +682,10 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             let buffer = view.buffer();
             let mut line = 0;
             while line < buffer.line_count() {
-                let Some(start) = buffer.iter_at_line(line) else { break };
-                let mut end = start.clone();
+                let Some(start) = buffer.iter_at_line(line) else {
+                    break;
+                };
+                let mut end = start;
                 end.forward_to_line_end();
                 if buffer.text(&start, &end, true).starts_with("| ") {
                     break;
@@ -694,8 +716,10 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             let buffer = view.buffer();
             let mut line = buffer.line_count() / 2;
             while line < buffer.line_count() {
-                let Some(start) = buffer.iter_at_line(line) else { break };
-                let mut end = start.clone();
+                let Some(start) = buffer.iter_at_line(line) else {
+                    break;
+                };
+                let mut end = start;
                 end.forward_to_line_end();
                 let text = buffer.text(&start, &end, true);
                 if text.starts_with("- **") {
@@ -710,7 +734,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             glib::timeout_add_local_once(Duration::from_millis(800), move || {
                 eprintln!("PROF cursor line {line}");
                 save_shot(&ctx, "cursor");
-                glib::timeout_add_local_once(Duration::from_millis(1500), move || run_steps(ctx, steps));
+                glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                    run_steps(ctx, steps)
+                });
             });
         }
         Step::Split(label) => {
@@ -730,7 +756,14 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 print_totals("PROF   ", &take_totals());
                 let (tables, second, mapped) = ctx.table_grid_report();
                 let same = ctx.widgets.views[0].buffer() == ctx.widgets.views[1].buffer();
-                let pane2 = ctx.state.borrow().session.pane_paths.get(1).cloned().flatten();
+                let pane2 = ctx
+                    .state
+                    .borrow()
+                    .session
+                    .pane_paths
+                    .get(1)
+                    .cloned()
+                    .flatten();
                 eprintln!("PROF {label}: tables {tables}, pane2 grids {second}, mapped {mapped}, pane2_same_buffer {same}, pane2_file {pane2:?}");
                 save_shot(&ctx, &label);
                 run_steps(ctx, steps);
@@ -780,7 +813,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 buffer.insert(&mut end, "\nМЕТКА_ОТМЕНЫ\n");
                 buffer.end_user_action();
                 eprintln!("PROF undo_switch typed, can_undo {}", buffer.can_undo());
-                glib::timeout_add_local_once(Duration::from_millis(900), move || run_steps(ctx, steps));
+                glib::timeout_add_local_once(Duration::from_millis(900), move || {
+                    run_steps(ctx, steps)
+                });
                 return;
             }
             glib::timeout_add_local_once(Duration::from_millis(900), move || {
@@ -790,7 +825,11 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                         break;
                     }
                     buffer.undo();
-                    if !ctx.buffer_text(&path).unwrap_or_default().contains("МЕТКА_ОТМЕНЫ") {
+                    if !ctx
+                        .buffer_text(&path)
+                        .unwrap_or_default()
+                        .contains("МЕТКА_ОТМЕНЫ")
+                    {
                         break;
                     }
                 }
@@ -798,7 +837,8 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     let after = ctx.buffer_text(&path).unwrap_or_default();
                     let original = UNDO_ORIGINAL.with(|o| o.borrow().clone());
                     let slice = buffer.slice(&buffer.start_iter(), &buffer.end_iter(), true);
-                    let literal = slice.matches('\u{FFFC}').count() as i64 - ctx.live_table_count() as i64;
+                    let literal =
+                        slice.matches('\u{FFFC}').count() as i64 - ctx.live_table_count() as i64;
                     let diff = original
                         .chars()
                         .zip(after.chars())
@@ -834,7 +874,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                 let mut rows = 0;
                 for window in gtk4::Window::list_toplevels() {
-                    let Ok(window) = window.downcast::<gtk4::Window>() else { continue };
+                    let Ok(window) = window.downcast::<gtk4::Window>() else {
+                        continue;
+                    };
                     if window.title().as_deref() != Some("Перейти к файлу") {
                         continue;
                     }
@@ -855,7 +897,10 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     }
                     window.close();
                 }
-                eprintln!("PROF quick_open: окно за {:.1} ms, строк {rows}", ms(opened));
+                eprintln!(
+                    "PROF quick_open: окно за {:.1} ms, строк {rows}",
+                    ms(opened)
+                );
                 run_steps(ctx, steps);
             });
         }
@@ -866,7 +911,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             };
             let _ = std::fs::remove_file(&path);
             glib::timeout_add_local_once(Duration::from_millis(600), move || {
-                ctx.focused_view().buffer().insert_at_cursor("правка после удаления ");
+                ctx.focused_view()
+                    .buffer()
+                    .insert_at_cursor("правка после удаления ");
                 glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                     eprintln!(
                         "PROF ext_delete: recreated_by_autosave {}, status {:?}",
@@ -912,12 +959,16 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 let buffer = ctx.focused_view().buffer();
                 let text = ctx.buffer_text(&path).unwrap_or_default();
                 let tables = text_workspace::tables::parse_tables(&text);
-                let after = tables.first().map_or(0, |t| text[..t.end].matches('\n').count());
+                let after = tables
+                    .first()
+                    .map_or(0, |t| text[..t.end].matches('\n').count());
                 // Первая непустая строка после таблицы.
                 let mut line = after as i32;
                 let mut info = String::from("нет строки");
                 while line < buffer.line_count() {
-                    let Some(start) = buffer.iter_at_line(line) else { break };
+                    let Some(start) = buffer.iter_at_line(line) else {
+                        break;
+                    };
                     let mut end = start;
                     end.forward_to_line_end();
                     let shown = buffer.text(&start, &end, true);
@@ -931,13 +982,18 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     }
                     line += 1;
                 }
-                eprintln!("PROF cell_tab: typed {typed}, cell_active {}, after table: {info}", ctx.any_table_cell_focused());
+                eprintln!(
+                    "PROF cell_tab: typed {typed}, cell_active {}, after table: {info}",
+                    ctx.any_table_cell_focused()
+                );
                 run_steps(ctx, steps);
             });
         }
         Step::PasteCheck => {
             let buffer = ctx.focused_view().buffer();
-            let mut at = buffer.iter_at_line(1).unwrap_or_else(|| buffer.start_iter());
+            let mut at = buffer
+                .iter_at_line(1)
+                .unwrap_or_else(|| buffer.start_iter());
             buffer.place_cursor(&at);
             buffer.begin_user_action();
             buffer.insert(
@@ -949,7 +1005,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                 let report = |needle: &str| -> String {
                     let mut line = 0;
                     while line < buffer.line_count() {
-                        let Some(start) = buffer.iter_at_line(line) else { break };
+                        let Some(start) = buffer.iter_at_line(line) else {
+                            break;
+                        };
                         let mut end = start;
                         end.forward_to_line_end();
                         let text = buffer.text(&start, &end, true);
@@ -969,7 +1027,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                                 .iter()
                                 .any(|t| t.name().as_deref() == Some("tw-hide"));
                             first.forward_char();
-                            return format!("line {line} tags {names:?} first_hidden {hidden_first}");
+                            return format!(
+                                "line {line} tags {names:?} first_hidden {hidden_first}"
+                            );
                         }
                         line += 1;
                     }
@@ -1018,7 +1078,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
         Step::Shot(name) => {
             glib::timeout_add_local_once(Duration::from_millis(1500), move || {
                 save_shot(&ctx, &name);
-                glib::timeout_add_local_once(Duration::from_millis(500), move || run_steps(ctx, steps));
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    run_steps(ctx, steps)
+                });
             });
         }
         Step::SplitSame(file) => {
@@ -1042,7 +1104,9 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             let before = ctx.buffer_text(&path).unwrap_or_default();
             let mut line = 0;
             while line < buffer.line_count() {
-                let Some(start) = buffer.iter_at_line(line) else { break };
+                let Some(start) = buffer.iter_at_line(line) else {
+                    break;
+                };
                 let mut end = start;
                 end.forward_to_line_end();
                 if buffer.text(&start, &end, true).starts_with("| ") {
@@ -1055,7 +1119,10 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
             }
             let typed = ctx.bench_type_in_cell("МЕТКА_ЯЧЕЙКИ");
             ctx.deactivate_table_cells();
-            let edited = ctx.buffer_text(&path).unwrap_or_default().contains("МЕТКА_ЯЧЕЙКИ");
+            let edited = ctx
+                .buffer_text(&path)
+                .unwrap_or_default()
+                .contains("МЕТКА_ЯЧЕЙКИ");
             glib::timeout_add_local_once(Duration::from_millis(900), move || {
                 let can = buffer.can_undo();
                 buffer.undo();
@@ -1116,14 +1183,37 @@ fn run_steps(ctx: Ctx, mut steps: Vec<Step>) {
                     };
                     eprintln!("PROF row_undo literal_fffc {literal}");
                     if after != before {
-                        let at = before.chars().zip(after.chars()).position(|(a, b)| a != b).unwrap_or(0);
-                        let b: String = before.chars().skip(at.saturating_sub(20)).take(60).collect();
-                        let a: String = after.chars().skip(at.saturating_sub(20)).take(60).collect();
+                        let at = before
+                            .chars()
+                            .zip(after.chars())
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(0);
+                        let b: String = before
+                            .chars()
+                            .skip(at.saturating_sub(20))
+                            .take(60)
+                            .collect();
+                        let a: String =
+                            after.chars().skip(at.saturating_sub(20)).take(60).collect();
                         eprintln!("PROF row_undo diff at {at}: before {b:?} after {a:?}");
-                        let m: String = added.chars().skip(at.saturating_sub(20)).take(120).collect();
+                        let m: String = added
+                            .chars()
+                            .skip(at.saturating_sub(20))
+                            .take(120)
+                            .collect();
                         eprintln!("PROF row_undo added near: {m:?}");
-                        let at2 = before.chars().rev().zip(after.chars().rev()).position(|(a, b)| a != b).unwrap_or(0);
-                        eprintln!("PROF row_undo tail diff from end {at2}, lens {} {} {}", before.chars().count(), added.chars().count(), after.chars().count());
+                        let at2 = before
+                            .chars()
+                            .rev()
+                            .zip(after.chars().rev())
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(0);
+                        eprintln!(
+                            "PROF row_undo tail diff from end {at2}, lens {} {} {}",
+                            before.chars().count(),
+                            added.chars().count(),
+                            after.chars().count()
+                        );
                     }
                     eprintln!(
                         "PROF row_undo: can_undo before {undo_before}, after add {can_undo}, rows {} -> {} -> {}, restored {}, tables live {}",
@@ -1207,7 +1297,12 @@ fn shoot(ctx: &Ctx, name: &str) -> bool {
     }
     let paintable = gtk4::WidgetPaintable::new(Some(&target));
     let snapshot = gtk4::Snapshot::new();
-    gtk4::gdk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(width), f64::from(height));
+    gtk4::gdk::prelude::PaintableExt::snapshot(
+        &paintable,
+        &snapshot,
+        f64::from(width),
+        f64::from(height),
+    );
     let Some(node) = snapshot.to_node() else {
         return false;
     };
@@ -1235,7 +1330,7 @@ fn scroll_stress(ctx: Ctx, steps: Vec<Step>, tick: u32, line: i32) {
     let buffer = view.buffer();
     let total = buffer.line_count();
     let (next, done) = if tick < 400 {
-        let down = (tick / 100) % 2 == 0;
+        let down = (tick / 100).is_multiple_of(2);
         let step = if down { 29 } else { -23 };
         let mut next = line + step;
         if next >= total {
@@ -1255,10 +1350,10 @@ fn scroll_stress(ctx: Ctx, steps: Vec<Step>, tick: u32, line: i32) {
     if let Some(mut iter) = buffer.iter_at_line(next) {
         buffer.place_cursor(&iter);
         view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.3);
-        if tick % 17 == 0 {
+        if tick.is_multiple_of(17) {
             buffer.insert(&mut iter, "z");
             let mut a = buffer.iter_at_mark(&buffer.get_insert());
-            let b = a.clone();
+            let b = a;
             a.backward_char();
             let (mut a, mut b) = (a, b);
             buffer.delete(&mut a, &mut b);
@@ -1274,7 +1369,11 @@ fn cpu_times_ms() -> (f64, f64, usize) {
     let read = |path: &std::path::Path| -> f64 {
         std::fs::read_to_string(path)
             .ok()
-            .and_then(|text| text.split_whitespace().next().and_then(|n| n.parse::<f64>().ok()))
+            .and_then(|text| {
+                text.split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<f64>().ok())
+            })
             .map(|ns| ns / 1e6)
             .unwrap_or(0.0)
     };
@@ -1289,7 +1388,6 @@ fn cpu_times_ms() -> (f64, f64, usize) {
     }
     (main, all, threads)
 }
-
 
 /// Анонимная память процесса (куча и прочее) до и после возврата свободного malloc.
 fn mem_report() -> String {
@@ -1315,7 +1413,14 @@ fn mem_report() -> String {
 /// Для замеров: решение по переходу в предпросмотре.
 pub(super) fn note_nav(uri: &str, clicked: bool, allowed: bool) {
     if std::env::var_os("VERST_PROF").is_some() {
-        let short: String = uri.chars().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect();
+        let short: String = uri
+            .chars()
+            .rev()
+            .take(60)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         eprintln!("PROF nav clicked={clicked} allowed={allowed} {short}");
     }
 }

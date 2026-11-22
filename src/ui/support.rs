@@ -1777,7 +1777,7 @@ pub(super) fn paint_graph(
         cr.line_to(to.x, to.y);
         cr.stroke().ok();
     }
-    let _ = cr.select_font_face(
+    cr.select_font_face(
         "Sans",
         gtk4::cairo::FontSlant::Normal,
         gtk4::cairo::FontWeight::Normal,
@@ -2073,7 +2073,10 @@ pub(super) fn publish_window_icon(window: &gtk4::ApplicationWindow) {
 /// Аргумент строки Exec= по спецификации .desktop: в кавычках, если есть
 /// пробелы или спецсимволы (иначе ярлык к пути с пробелами не работал).
 fn desktop_exec_arg(arg: &str) -> String {
-    if !arg.chars().any(|c| c.is_whitespace() || "\"'\\$`;&|<>()*?#~".contains(c)) {
+    if !arg
+        .chars()
+        .any(|c| c.is_whitespace() || "\"'\\$`;&|<>()*?#~".contains(c))
+    {
         return arg.to_string();
     }
     let mut out = String::from("\"");
@@ -2105,8 +2108,15 @@ pub(super) fn install_launcher_icon() -> Option<PathBuf> {
         fs::write(&icon_path, LAUNCHER_ICON).ok()?;
     }
     let exe = std::env::current_exe().ok();
-    if exe.as_deref().is_some_and(|exe| owns_user_launcher(exe, &home)) {
-        write_user_launcher(&home, exe.as_deref().unwrap_or(Path::new("verst")), &icon_path);
+    if exe
+        .as_deref()
+        .is_some_and(|exe| owns_user_launcher(exe, &home))
+    {
+        write_user_launcher(
+            &home,
+            exe.as_deref().unwrap_or(Path::new("verst")),
+            &icon_path,
+        );
     }
     Some(icon_path)
 }
@@ -2193,6 +2203,21 @@ pub(super) fn file_label(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("файл")
         .to_string()
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+extern "C" {
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// Вернуть системе память, которую освободили, но malloc держит у себя.
+/// После удаления сеток таблиц это 10–15 МБ.
+pub(super) fn release_freed_memory() {
+    let _prof = crate::ui::prof::span("malloc_trim");
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        malloc_trim(0);
+    }
 }
 
 #[cfg(test)]
@@ -2286,9 +2311,15 @@ mod tests {
     #[test]
     fn only_user_install_owns_the_launcher() {
         let home = Path::new("/home/u");
-        assert!(owns_user_launcher(Path::new("/home/u/.local/bin/verst"), home));
+        assert!(owns_user_launcher(
+            Path::new("/home/u/.local/bin/verst"),
+            home
+        ));
         assert!(!owns_user_launcher(Path::new("/usr/bin/verst"), home));
-        assert!(!owns_user_launcher(Path::new("/home/u/src/verst/target/release/text_workspace"), home));
+        assert!(!owns_user_launcher(
+            Path::new("/home/u/src/verst/target/release/text_workspace"),
+            home
+        ));
         assert!(!owns_user_launcher(Path::new("/tmp/verst"), home));
     }
 
@@ -2310,20 +2341,5 @@ mod tests {
         assert_eq!(anchor_line_at(499, 9, Some(500)), 10);
         assert_eq!(anchor_line_at(500, 10, Some(522)), 10);
         assert_eq!(anchor_line_at(510, 10, Some(522)), 10);
-    }
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-extern "C" {
-    fn malloc_trim(pad: usize) -> i32;
-}
-
-/// Вернуть системе память, которую освободили, но malloc держит у себя.
-/// После удаления сеток таблиц это 10–15 МБ.
-pub(super) fn release_freed_memory() {
-    let _prof = crate::ui::prof::span("malloc_trim");
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    unsafe {
-        malloc_trim(0);
     }
 }

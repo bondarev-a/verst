@@ -282,7 +282,7 @@ pub fn escape_cell_pipes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut backslashes = 0usize;
     for ch in text.chars() {
-        if ch == '|' && backslashes % 2 == 0 {
+        if ch == '|' && backslashes.is_multiple_of(2) {
             out.push('\\');
         }
         backslashes = if ch == '\\' { backslashes + 1 } else { 0 };
@@ -402,7 +402,11 @@ fn pipe_row_cells(source: &str, line_start: usize, line: &str) -> Vec<TableCell>
     }
     let lead = line.len() - line.trim_start_matches([' ', '\t']).len();
     let mut cells = Vec::new();
-    let mut i = if line[lead..].starts_with('|') { lead + 1 } else { 0 };
+    let mut i = if line[lead..].starts_with('|') {
+        lead + 1
+    } else {
+        0
+    };
     let mut cell_at = line_start + i;
     let mut escaped = false;
     while i < line.len() {
@@ -478,7 +482,10 @@ mod tests {
         assert_eq!(table.column_count(), 2);
         assert_eq!(table.cell(1, 1).unwrap().text.trim(), "2");
         let grown = add_row(src, 0).unwrap();
-        assert!(grown.contains("| 1 | 2|") || grown.contains("1 | 2"), "{grown}");
+        assert!(
+            grown.contains("| 1 | 2|") || grown.contains("1 | 2"),
+            "{grown}"
+        );
         let again = &parse_tables(&grown)[0];
         assert_eq!(again.column_count(), 2);
         assert_eq!(again.cell(1, 1).unwrap().text.trim(), "2");
@@ -489,7 +496,10 @@ mod tests {
         let src = "| ссылка | x |\n| --- | --- |\n| [[заметка\\|подпись]] | 2 |\n";
         let table = &parse_tables(src)[0];
         assert_eq!(table.column_count(), 2);
-        assert_eq!(table.cell(1, 0).unwrap().text.trim(), "[[заметка\\|подпись]]");
+        assert_eq!(
+            table.cell(1, 0).unwrap().text.trim(),
+            "[[заметка\\|подпись]]"
+        );
         assert_eq!(table.cell(1, 1).unwrap().text.trim(), "2");
         let wide = insert_column_at(src, 0, 2).unwrap();
         assert!(wide.contains("[[заметка\\|подпись]]"), "{wide}");

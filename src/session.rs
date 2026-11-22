@@ -370,11 +370,9 @@ impl Session {
         self.window_width = self.window_width.clamp(MIN_WINDOW_WIDTH, 8000);
         self.window_height = self.window_height.clamp(MIN_WINDOW_HEIGHT, 8000);
         dedupe_carets(&mut self.carets);
-        for pane in self.pane_paths.clone() {
-            if let Some(path) = pane {
-                if !self.open_files.iter().any(|open| open == &path) {
-                    self.open_files.push(path);
-                }
+        for path in self.pane_paths.clone().into_iter().flatten() {
+            if !self.open_files.iter().any(|open| open == &path) {
+                self.open_files.push(path);
             }
         }
         self.open_limit = self.open_limit.clamp(OPEN_LIMIT_MIN, OPEN_LIMIT_MAX);
@@ -634,17 +632,16 @@ mod tests {
         );
         assert_eq!(back.right_order[0], "outline");
         // Неизвестные вкладки отбрасываются, недостающие дописываются в конец.
-        let back = Session::from_json(r#"{"left_tab_order":["история","history","notes"]}"#)
-            .unwrap();
+        let back =
+            Session::from_json(r#"{"left_tab_order":["история","history","notes"]}"#).unwrap();
         assert_eq!(
             back.left_order,
             ["history", "notes", "open", "disk", "workspace"]
         );
         // Порядок под старым ключом — не выбор пользователя, а умолчание старой версии.
-        let old = Session::from_json(
-            r#"{"left_order":["disk","workspace","notes","open","history"]}"#,
-        )
-        .unwrap();
+        let old =
+            Session::from_json(r#"{"left_order":["disk","workspace","notes","open","history"]}"#)
+                .unwrap();
         assert_eq!(
             old.left_order,
             ["open", "disk", "workspace", "notes", "history"]

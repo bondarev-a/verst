@@ -276,7 +276,12 @@ pub fn outgoing_targets(
     scope: &Path,
     markdown_files: &[PathBuf],
 ) -> Vec<PathBuf> {
-    outgoing_with(text, from, scope, &markdown::WikiLookup::new(markdown_files))
+    outgoing_with(
+        text,
+        from,
+        scope,
+        &markdown::WikiLookup::new(markdown_files),
+    )
 }
 
 fn outgoing_with(
@@ -537,7 +542,11 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("c.md"), "тоже #общая\n").unwrap();
-        fs::write(root.join("d.md"), "\u{feff}---\ntags: [общая]\n---\n[[c]]\n").unwrap();
+        fs::write(
+            root.join("d.md"),
+            "\u{feff}---\ntags: [общая]\n---\n[[c]]\n",
+        )
+        .unwrap();
         let index = build_index(&root);
         assert_eq!(index.files_with_tag("общая").len(), 3);
         assert!(index
@@ -688,17 +697,27 @@ mod tests {
         assert_eq!(index.incoming_of(&target), full.incoming_of(&target));
         assert_eq!(
             index.incoming_edges(&root.join(".").join("цель.md")),
-            [root.join("арбуз.md"), root.join("борщ.md"), root.join("яблоко.md")]
+            [
+                root.join("арбуз.md"),
+                root.join("борщ.md"),
+                root.join("яблоко.md")
+            ]
         );
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn index_skips_tool_dirs_and_huge_files() {
-        let root =
-            std::env::temp_dir().join(format!("text_workspace_skip_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("text_workspace_skip_{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        for dir in [".venv", "venv", "__pycache__", ".obsidian", ".trash", "заметки"] {
+        for dir in [
+            ".venv",
+            "venv",
+            "__pycache__",
+            ".obsidian",
+            ".trash",
+            "заметки",
+        ] {
             fs::create_dir_all(root.join(dir)).unwrap();
             fs::write(root.join(dir).join("внутри.md"), "[[цель]]\n").unwrap();
         }

@@ -2,6 +2,7 @@
 name = "text_workspace"
 version = "0.7.2"
 edition = "2021"
+rust-version = "1.87"
 description = "Локальный редактор текстовых файлов с навигацией как в IDE"
 license = "GPL-3.0-or-later"
 publish = false

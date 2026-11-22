@@ -114,7 +114,8 @@ impl Ctx {
             return false;
         };
         let state = self.state.borrow();
-        if !state.render.painted || state.render.painted_path.as_deref() != Some(focused.as_path()) {
+        if !state.render.painted || state.render.painted_path.as_deref() != Some(focused.as_path())
+        {
             return false;
         }
         state
@@ -241,7 +242,7 @@ impl Ctx {
     }
 
     pub(super) fn refresh_render_now(&self) {
-    let _prof = crate::ui::prof::span("refresh_render_now");
+        let _prof = crate::ui::prof::span("refresh_render_now");
         if !self.editing_markdown() {
             self.clear_render_layer();
             return;
@@ -308,7 +309,13 @@ impl Ctx {
 
     /// Для замеров: сколько сеток таблиц в первой панели.
     pub(super) fn first_pane_grid_count(&self) -> usize {
-        self.state.borrow().render.tables.iter().filter(|t| t.grids[0].is_some()).count()
+        self.state
+            .borrow()
+            .render
+            .tables
+            .iter()
+            .filter(|t| t.grids[0].is_some())
+            .count()
     }
 
     /// Для замеров: сколько таблиц сейчас показано виджетами (якорь жив).
@@ -327,7 +334,13 @@ impl Ctx {
         let Some(path) = self.focused_path() else {
             return "нет файла".into();
         };
-        let Some(buffer) = self.state.borrow().buffers.get(&path).map(|e| e.buffer.clone()) else {
+        let Some(buffer) = self
+            .state
+            .borrow()
+            .buffers
+            .get(&path)
+            .map(|e| e.buffer.clone())
+        else {
             return "нет буфера".into();
         };
         let cursor = buffer.iter_at_mark(&buffer.get_insert()).line();
@@ -336,8 +349,10 @@ impl Ctx {
             if out.len() >= 2 || line == cursor {
                 continue;
             }
-            let Some(iter) = buffer.iter_at_line(line) else { continue };
-            let mut end = iter.clone();
+            let Some(iter) = buffer.iter_at_line(line) else {
+                continue;
+            };
+            let mut end = iter;
             end.forward_chars(3);
             if !buffer.text(&iter, &end, true).starts_with("##") {
                 continue;
@@ -346,9 +361,22 @@ impl Ctx {
                 .tags()
                 .iter()
                 .map(|t| {
-                    let name = t.name().map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+                    let name = t
+                        .name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".into());
                     let fg = if t.is_foreground_set() {
-                        t.foreground_rgba().map(|c| format!("{:.2},{:.2},{:.2},{:.2}", c.red(), c.green(), c.blue(), c.alpha())).unwrap_or_default()
+                        t.foreground_rgba()
+                            .map(|c| {
+                                format!(
+                                    "{:.2},{:.2},{:.2},{:.2}",
+                                    c.red(),
+                                    c.green(),
+                                    c.blue(),
+                                    c.alpha()
+                                )
+                            })
+                            .unwrap_or_default()
                     } else {
                         "-".into()
                     };
@@ -357,7 +385,11 @@ impl Ctx {
                 .collect();
             out.push(format!("line {line}: {}", tags.join(" ")));
         }
-        format!("tag_table {} | {}", buffer.tag_table().size(), out.join(" || "))
+        format!(
+            "tag_table {} | {}",
+            buffer.tag_table().size(),
+            out.join(" || ")
+        )
     }
 
     /// Высота курсора ячейки. Считается один раз на размер текста.
@@ -420,10 +452,15 @@ impl Ctx {
         let Some(entry) = self.table_entry(table, row, col) else {
             return "нет поля".into();
         };
-        let Some(overlay) = entry.parent().and_then(|p| p.downcast::<gtk4::Overlay>().ok()) else {
+        let Some(overlay) = entry
+            .parent()
+            .and_then(|p| p.downcast::<gtk4::Overlay>().ok())
+        else {
             return "нет ячейки".into();
         };
-        let bar = overlay_caret_bar(&overlay).map(|b| b.height()).unwrap_or(-1);
+        let bar = overlay_caret_bar(&overlay)
+            .map(|b| b.height())
+            .unwrap_or(-1);
         format!(
             "ячейка ({row},{col}): курсор {bar} px, строка поля {} px, ячейка {} px",
             entry.create_pango_layout(Some("Ag")).pixel_size().1,
@@ -527,7 +564,7 @@ impl Ctx {
     }
 
     fn drop_embeds(&self, tables: &[LiveTable], images: &[LiveImage]) {
-    let _prof = crate::ui::prof::span("drop_embeds");
+        let _prof = crate::ui::prof::span("drop_embeds");
         for table in tables {
             for grid in table.grids.iter().flatten() {
                 detach_child(grid);
@@ -635,7 +672,7 @@ impl Ctx {
     }
 
     pub(super) fn sync_table_grid_widths(&self) {
-    let _prof = crate::ui::prof::span("sync_table_grid_widths");
+        let _prof = crate::ui::prof::span("sync_table_grid_widths");
         let tables: Vec<[Option<gtk4::Grid>; 2]> = self
             .state
             .borrow()
@@ -655,7 +692,7 @@ impl Ctx {
     }
 
     pub(super) fn apply_text_zoom_tags(&self) {
-    let _prof = crate::ui::prof::span("apply_text_zoom_tags");
+        let _prof = crate::ui::prof::span("apply_text_zoom_tags");
         let pt = self.state.borrow().session.text_pt;
         let scale = zoom::webkit_factor(pt);
         let buffers: Vec<_> = self
@@ -959,7 +996,7 @@ impl Ctx {
     }
 
     fn restore_table_focus(&self) {
-    let _prof = crate::ui::prof::span("restore_table_focus");
+        let _prof = crate::ui::prof::span("restore_table_focus");
         let Some((table, row, col)) = self.state.borrow_mut().render.pending_table_focus.take()
         else {
             return;
@@ -1244,7 +1281,9 @@ impl Ctx {
                 .tables
                 .iter()
                 .find(|item| item.index == table)?;
-            live.grids[pane].as_ref()?.child_at(col as i32, row as i32)?
+            live.grids[pane]
+                .as_ref()?
+                .child_at(col as i32, row as i32)?
         };
         ensure_cell_entry(self, &cell, table, row, col)
     }
@@ -1727,7 +1766,7 @@ impl Ctx {
     }
 
     fn recover_table_cover(&self, buffer: &sourceview5::Buffer) {
-    let _prof = crate::ui::prof::span("recover_table_cover");
+        let _prof = crate::ui::prof::span("recover_table_cover");
         let text = buffer_text_of(buffer);
         // Правка ячейки меняет длину исходника таблицы, а границы живых
         // таблиц до следующей полной перерисовки оставались старыми: тег,
@@ -1786,7 +1825,7 @@ impl Ctx {
     }
 
     fn shift_cursor_line(&self, line: i32) {
-    let _prof = crate::ui::prof::span("shift_cursor_line");
+        let _prof = crate::ui::prof::span("shift_cursor_line");
         let prev = self.state.borrow().render.cursor_line;
         if prev == Some(line) {
             return;
@@ -1826,10 +1865,19 @@ impl Ctx {
     }
 
     fn rebuild_widgets(&self, buffer: &sourceview5::Buffer, path: &Path, cursor_line: i32) {
-    let _prof = crate::ui::prof::span("rebuild_widgets");
-        let text = { let _p = crate::ui::prof::span("rw:buffer_text"); buffer_text_of(buffer) };
-        let spans = { let _p = crate::ui::prof::span("rw:mark_spans"); mark_spans(&text) };
-        let md_tables = { let _p = crate::ui::prof::span("rw:parse_tables"); tables::parse_tables(&text) };
+        let _prof = crate::ui::prof::span("rebuild_widgets");
+        let text = {
+            let _p = crate::ui::prof::span("rw:buffer_text");
+            buffer_text_of(buffer)
+        };
+        let spans = {
+            let _p = crate::ui::prof::span("rw:mark_spans");
+            mark_spans(&text)
+        };
+        let md_tables = {
+            let _p = crate::ui::prof::span("rw:parse_tables");
+            tables::parse_tables(&text)
+        };
         let bodies: Vec<String> = md_tables
             .iter()
             .map(|table| slice_bytes(&text, table.start, table.end).to_string())
@@ -1966,7 +2014,11 @@ impl Ctx {
         drop(reuse_tables);
         drop(reuse_images);
         let freed = !old_tables.is_empty() || !old_images.is_empty();
-        { let _p = crate::ui::prof::span("rw:free_old_widgets"); drop(old_tables); drop(old_images); }
+        {
+            let _p = crate::ui::prof::span("rw:free_old_widgets");
+            drop(old_tables);
+            drop(old_images);
+        }
         if freed {
             // Освобождённые сетки таблиц malloc сам системе не отдаёт.
             glib::idle_add_local_once(super::support::release_freed_memory);
@@ -2010,7 +2062,8 @@ impl Ctx {
                     };
                     let iter = map.iter(buffer, &text, table.start);
                     let anchor = take_or_create_anchor(buffer, iter, &mut spare);
-                    if let Some(live) = self.mount_table(buffer, path, &text, anchor, table, index) {
+                    if let Some(live) = self.mount_table(buffer, path, &text, anchor, table, index)
+                    {
                         live_tables.push(live);
                     }
                 }
@@ -2052,7 +2105,7 @@ impl Ctx {
         bodies: Vec<String>,
         image_keys: Vec<String>,
     ) {
-    let _prof = crate::ui::prof::span("store_paint");
+        let _prof = crate::ui::prof::span("store_paint");
         let sigs = line_signatures(text, &spans);
         let mut state = self.state.borrow_mut();
         state.render.line_starts = line_starts_of(text);
@@ -2071,7 +2124,10 @@ impl Ctx {
     /// теперь другой) их надо пересобрать.
     fn embeds_match_panes(&self, buffer: &sourceview5::Buffer) -> bool {
         let split = self.state.borrow().session.split;
-        let wanted = [self.pane_shows(0, buffer), split && self.pane_shows(1, buffer)];
+        let wanted = [
+            self.pane_shows(0, buffer),
+            split && self.pane_shows(1, buffer),
+        ];
         let images_wanted = [self.pane_shows(0, buffer), self.pane_shows(1, buffer)];
         let state = self.state.borrow();
         state
@@ -2101,13 +2157,16 @@ impl Ctx {
         table: &MdTable,
         index: usize,
     ) -> Option<LiveTable> {
-    let _prof = crate::ui::prof::span("mount_table");
+        let _prof = crate::ui::prof::span("mount_table");
         lift_anchor_scale(buffer, &anchor);
         let focus_cell = Rc::new(RefCell::new(None));
         // Скрытой второй панели сетка не нужна: каждая ячейка — это Entry,
         // Overlay и три контроллера, а вторая копия удваивала их число.
         let split = self.state.borrow().session.split;
-        let wanted = [self.pane_shows(0, buffer), split && self.pane_shows(1, buffer)];
+        let wanted = [
+            self.pane_shows(0, buffer),
+            split && self.pane_shows(1, buffer),
+        ];
         let grids = [
             wanted[0].then(|| build_table_grid(self, path, table, index)),
             wanted[1].then(|| build_table_grid(self, path, table, index)),
@@ -2119,8 +2178,8 @@ impl Ctx {
             self.widgets.views[pane].add_child_at_anchor(grid, &anchor);
             size_table_grid(grid, &self.widgets.views[pane]);
         }
-        let start_line = newline_count(slice_bytes(&text, 0, table.start));
-        let mut end_line = newline_count(slice_bytes(&text, 0, table.end));
+        let start_line = newline_count(slice_bytes(text, 0, table.start));
+        let mut end_line = newline_count(slice_bytes(text, 0, table.end));
         if end_line <= start_line {
             end_line = start_line + 1;
         }
@@ -2144,7 +2203,7 @@ impl Ctx {
         anchor: gtk4::TextChildAnchor,
         dest: &str,
     ) -> Option<LiveImage> {
-    let _prof = crate::ui::prof::span("mount_image");
+        let _prof = crate::ui::prof::span("mount_image");
         lift_anchor_scale(buffer, &anchor);
         let file = resolve_image(path, dest);
         let mut widgets = [None, None];
@@ -2191,14 +2250,8 @@ impl Ctx {
 }
 
 enum Placement {
-    Table {
-        index: usize,
-        start: usize,
-    },
-    Image {
-        start: usize,
-        dest: String,
-    },
+    Table { index: usize, start: usize },
+    Image { start: usize, dest: String },
 }
 
 impl Placement {
@@ -2209,12 +2262,7 @@ impl Placement {
     }
 }
 
-fn build_table_grid(
-    ctx: &Ctx,
-    path: &Path,
-    table: &MdTable,
-    table_index: usize,
-) -> gtk4::Grid {
+fn build_table_grid(ctx: &Ctx, path: &Path, table: &MdTable, table_index: usize) -> gtk4::Grid {
     let _prof = crate::ui::prof::span("build_table_grid");
     let grid = gtk4::Grid::new();
     grid.add_css_class("tw-md-table");
@@ -2286,13 +2334,7 @@ fn build_table_grid(
                 let Some(anchor) = gesture.widget() else {
                     return;
                 };
-                ctx_menu.show_table_menu(
-                    &anchor,
-                    path_menu.clone(),
-                    table_index,
-                    row,
-                    col,
-                );
+                ctx_menu.show_table_menu(&anchor, path_menu.clone(), table_index, row, col);
             });
             overlay.add_controller(right);
             overlay.set_hexpand(true);
@@ -2377,12 +2419,7 @@ fn ensure_cell_entry(
     Some(entry)
 }
 
-fn paint_tags(
-    buffer: &sourceview5::Buffer,
-    text: &str,
-    spans: &[MarkSpan],
-    cursor_line: i32,
-) {
+fn paint_tags(buffer: &sourceview5::Buffer, text: &str, spans: &[MarkSpan], cursor_line: i32) {
     let _prof = crate::ui::prof::span("paint_tags");
     clear_render_tags(buffer);
     let cursor_range = line_byte_range(text, cursor_line);
@@ -2485,7 +2522,7 @@ fn cover_table_source(
 fn lift_anchor_scale(buffer: &sourceview5::Buffer, anchor: &gtk4::TextChildAnchor) {
     let _prof = crate::ui::prof::span("lift_anchor_scale");
     let a = buffer.iter_at_child_anchor(anchor);
-    let mut b = a.clone();
+    let mut b = a;
     if !b.forward_char() {
         return;
     }
@@ -2532,7 +2569,7 @@ fn retag_cursor_line(
     let Some(from) = buffer.iter_at_line(line) else {
         return true;
     };
-    let mut to = from.clone();
+    let mut to = from;
     if !to.forward_line() {
         to = buffer.end_iter();
     }
@@ -2627,7 +2664,7 @@ fn forward_in_line(
         }
         *at = byte;
     }
-    iter.clone()
+    *iter
 }
 
 /// Байтовые смещения текста файла → позиции в буфере.
@@ -2798,7 +2835,7 @@ fn ensure_tag(table: &gtk4::TextTagTable, name: &str, configure: impl FnOnce(&gt
 }
 
 fn raise_tag(table: &gtk4::TextTagTable, tag: &gtk4::TextTag) {
-    let last = table.size().saturating_sub(1) as i32;
+    let last = table.size().saturating_sub(1);
     if last > 0 {
         tag.set_priority(last);
     }
@@ -2848,7 +2885,9 @@ fn line_signatures(text: &str, spans: &[MarkSpan]) -> Vec<(u64, u64)> {
     let mut marks: Vec<std::collections::hash_map::DefaultHasher> =
         (0..starts.len()).map(|_| Default::default()).collect();
     for span in spans {
-        let mut line = starts.partition_point(|at| *at <= span.start).saturating_sub(1);
+        let mut line = starts
+            .partition_point(|at| *at <= span.start)
+            .saturating_sub(1);
         while line < starts.len() && starts[line] < span.end.max(span.start + 1) {
             let begin = starts[line];
             let hasher = &mut marks[line];
@@ -2873,11 +2912,7 @@ fn line_signatures(text: &str, spans: &[MarkSpan]) -> Vec<(u64, u64)> {
 /// (между общими началом и концом) и те, у которых при том же тексте
 /// поменялась разметка.
 fn changed_lines(old: &[(u64, u64)], new: &[(u64, u64)]) -> Vec<i32> {
-    let prefix = old
-        .iter()
-        .zip(new)
-        .take_while(|(a, b)| a.0 == b.0)
-        .count();
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a.0 == b.0).count();
     let room = old.len().min(new.len()) - prefix;
     let suffix = old
         .iter()
@@ -3034,7 +3069,7 @@ fn remove_path_anchors(
             continue;
         }
         let mut iter = buffer.iter_at_child_anchor(&anchor);
-        let mut end = iter.clone();
+        let mut end = iter;
         end.forward_char();
         buffer.delete(&mut iter, &mut end);
     }
@@ -3302,10 +3337,14 @@ fn texture_bytes(texture: &gtk4::gdk::Texture) -> usize {
 }
 
 fn cached_texture(path: &Path) -> Option<gtk4::gdk::Texture> {
-    let modified = std::fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
+    let modified = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()?;
     let hit = TEXTURES.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let at = cache.iter().position(|(p, m, _)| p == path && *m == modified)?;
+        let at = cache
+            .iter()
+            .position(|(p, m, _)| p == path && *m == modified)?;
         let entry = cache.remove(at);
         let texture = entry.2.clone();
         cache.push(entry);
@@ -3321,7 +3360,11 @@ fn cached_texture(path: &Path) -> Option<gtk4::gdk::Texture> {
         cache.push((path.to_path_buf(), modified, texture.clone()));
         // Самые давние вон, пока не уложимся; последняя остаётся всегда.
         while cache.len() > 1
-            && cache.iter().map(|(_, _, t)| texture_bytes(t)).sum::<usize>() > TEXTURE_CACHE_BYTES
+            && cache
+                .iter()
+                .map(|(_, _, t)| texture_bytes(t))
+                .sum::<usize>()
+                > TEXTURE_CACHE_BYTES
         {
             cache.remove(0);
         }
@@ -3372,7 +3415,10 @@ mod tests {
         // Открытая ``` меняет оформление следующих строк при том же тексте.
         let fenced = "```\nабзац\n\nвторой\nтретий\n";
         let lines = changed_lines(&sig(before), &sig(fenced));
-        assert!(lines.contains(&0) && lines.contains(&1) && lines.contains(&3), "{lines:?}");
+        assert!(
+            lines.contains(&0) && lines.contains(&1) && lines.contains(&3),
+            "{lines:?}"
+        );
         assert!(changed_lines(&sig(before), &sig(before)).is_empty());
     }
 

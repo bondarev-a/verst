@@ -164,10 +164,10 @@ mod files;
 mod lists;
 mod navigate;
 mod notes;
+pub(crate) mod prof;
 mod render;
 mod settings;
 mod support;
-pub(crate) mod prof;
 
 pub fn prof_mark_main() {
     prof::mark_main();
@@ -463,7 +463,7 @@ pub fn open_files(app: &gtk4::Application, files: &[gio::File], _hint: &str) {
 
 impl Ctx {
     fn new(app: &gtk4::Application) -> Self {
-    let _prof = crate::ui::prof::span("new");
+        let _prof = crate::ui::prof::span("new");
         let session = session::Session::load();
         let empty_buffer = sourceview5::Buffer::new(None);
         empty_buffer.set_enable_undo(true);
@@ -2308,7 +2308,7 @@ impl Ctx {
     }
 
     fn restore(&self) {
-    let _prof = crate::ui::prof::span("restore");
+        let _prof = crate::ui::prof::span("restore");
         self.state.borrow_mut().loading = true;
         let session = self.state.borrow().session.clone();
         self.apply_ui_zoom();
@@ -2658,7 +2658,7 @@ impl Ctx {
     }
 
     fn follow_focus(&self) {
-    let _prof = crate::ui::prof::span("follow_focus");
+        let _prof = crate::ui::prof::span("follow_focus");
         self.state.borrow_mut().nav_dir = None;
         self.apply_saved_mode();
         let path = self.focused_path();
@@ -2913,7 +2913,7 @@ impl Ctx {
     }
 
     fn apply_view_mode(&self) {
-    let _prof = crate::ui::prof::span("apply_view_mode");
+        let _prof = crate::ui::prof::span("apply_view_mode");
         self.refresh_nav_path();
         self.sync_view_dropdown();
         let browsing = self.state.borrow().browsing;
@@ -2978,7 +2978,9 @@ impl Ctx {
             self.widgets.open_mode_dropdown.set_selected(index);
         }
         let path = self.focused_path();
-        let switchable = path.as_deref().is_some_and(|path| !kind::is_view_only(path));
+        let switchable = path
+            .as_deref()
+            .is_some_and(|path| !kind::is_view_only(path));
         let (icon, tip) = match mode {
             ViewMode::Edit => ("view-reveal-symbolic", "Просмотр (Ctrl+E)"),
             ViewMode::Preview => ("document-edit-symbolic", "Редактирование (Ctrl+E)"),
@@ -3092,7 +3094,7 @@ impl Ctx {
     }
 
     fn refresh_outline(&self) {
-    let _prof = crate::ui::prof::span("refresh_outline");
+        let _prof = crate::ui::prof::span("refresh_outline");
         let headings = self.outline_headings();
         if self.side_changed("outline", SideContent::Outline(headings.clone())) {
             fill_outline(&self.widgets.outline_list, &headings);
@@ -3101,7 +3103,7 @@ impl Ctx {
     }
 
     fn refresh_file_facts(&self) {
-    let _prof = crate::ui::prof::span("refresh_file_facts");
+        let _prof = crate::ui::prof::span("refresh_file_facts");
         clear_box(&self.widgets.file_facts);
         let Some(path) = self.focused_path() else {
             return;
@@ -3303,7 +3305,7 @@ impl Ctx {
     }
 
     fn refresh_preview_now(&self) {
-    let _prof = crate::ui::prof::span("refresh_preview_now");
+        let _prof = crate::ui::prof::span("refresh_preview_now");
         let view_mode = self.state.borrow().view_mode;
         let Some(path) = self.focused_path() else {
             self.clear_picture();
@@ -3449,7 +3451,7 @@ impl Ctx {
     }
 
     fn sync_open_tags(&self) {
-    let _prof = crate::ui::prof::span("sync_open_tags");
+        let _prof = crate::ui::prof::span("sync_open_tags");
         let Some(pin) = self.pin_path() else {
             return;
         };
@@ -3478,7 +3480,7 @@ impl Ctx {
     }
 
     fn sync_open_links(&self) {
-    let _prof = crate::ui::prof::span("sync_open_links");
+        let _prof = crate::ui::prof::span("sync_open_links");
         let Some(active) = self.pin_path() else {
             return;
         };
@@ -3510,7 +3512,7 @@ impl Ctx {
     }
 
     fn outgoing_of_note(&self, path: &Path) -> Vec<PathBuf> {
-    let _prof = crate::ui::prof::span("outgoing_of_note");
+        let _prof = crate::ui::prof::span("outgoing_of_note");
         let key = {
             let state = self.state.borrow();
             state
@@ -3599,7 +3601,7 @@ impl Ctx {
     /// Входящие — обратные рёбра того же графа, из которого взяты исходящие.
     /// Для файла вне активного пина граф строится по его запиненному каталогу.
     fn incoming_of_note(&self, path: &Path) -> Vec<PathBuf> {
-    let _prof = crate::ui::prof::span("incoming_of_note");
+        let _prof = crate::ui::prof::span("incoming_of_note");
         let Some(active) = self.pin_path() else {
             return Vec::new();
         };
@@ -3709,7 +3711,7 @@ impl Ctx {
     }
 
     fn refresh_tag_chips(&self) {
-    let _prof = crate::ui::prof::span("refresh_tag_chips");
+        let _prof = crate::ui::prof::span("refresh_tag_chips");
         let wanted = self
             .focused_path()
             .filter(|path| is_markdown(path))
@@ -3786,7 +3788,7 @@ impl Ctx {
     }
 
     fn refresh_backlinks(&self) {
-    let _prof = crate::ui::prof::span("refresh_backlinks");
+        let _prof = crate::ui::prof::span("refresh_backlinks");
         self.sync_open_links();
         let tag_query = self.state.borrow().tag_query.clone();
         if let Some(tag) = tag_query {
@@ -3921,7 +3923,7 @@ impl Ctx {
     }
 
     fn relayout_graph(&self) {
-    let _prof = crate::ui::prof::span("relayout_graph");
+        let _prof = crate::ui::prof::span("relayout_graph");
         let width = self.widgets.graph.width().max(280);
         let height = self.widgets.graph.height().max(360);
         let current = self.focused_path();
@@ -3968,7 +3970,7 @@ impl Ctx {
     }
 
     fn run_search(&self) {
-    let _prof = crate::ui::prof::span("run_search");
+        let _prof = crate::ui::prof::span("run_search");
         let query = self.widgets.search_entry.text().to_string();
         let Some(pin) = self.pin_path() else {
             clear_list(&self.widgets.search_list);
@@ -4026,7 +4028,7 @@ impl Ctx {
     }
 
     fn reindex(&self) {
-    let _prof = crate::ui::prof::span("reindex");
+        let _prof = crate::ui::prof::span("reindex");
         let Some(pin) = self.pin_path() else {
             self.state.borrow_mut().index = index::LinkIndex::default();
             self.state.borrow_mut().links_gen += 1;
@@ -4123,7 +4125,10 @@ impl Ctx {
     fn pick_wiki(&self, name: &str) {
         // Раздел ссылки: [[Заметка#Раздел]], [[Заметка#^блок]], [[#Раздел]].
         let parts = markdown::wiki_parts(name);
-        let fragment = parts.as_ref().and_then(|parts| parts.fragment).map(str::to_string);
+        let fragment = parts
+            .as_ref()
+            .and_then(|parts| parts.fragment)
+            .map(str::to_string);
         let line_in = |path: &Path| -> Option<u32> {
             let fragment = fragment.as_deref()?;
             let text = self
@@ -4265,12 +4270,26 @@ impl Ctx {
                 let earlier = match &visible {
                     None => true,
                     Some((v, _)) => {
-                        let wrapped_v = if forward { v < &from_forward } else { v > &start };
-                        let wrapped_h = if forward { hit < from_forward } else { hit > start };
+                        let wrapped_v = if forward {
+                            v < &from_forward
+                        } else {
+                            v > &start
+                        };
+                        let wrapped_h = if forward {
+                            hit < from_forward
+                        } else {
+                            hit > start
+                        };
                         match (wrapped_h, wrapped_v) {
                             (false, true) => true,
                             (true, false) => false,
-                            _ => if forward { hit < *v } else { hit > *v },
+                            _ => {
+                                if forward {
+                                    hit < *v
+                                } else {
+                                    hit > *v
+                                }
+                            }
                         }
                     }
                 };
@@ -4786,7 +4805,10 @@ impl Ctx {
                     session::NAV_MIN_WIDTH + session::ACTIVITY_WIDTH,
                     session::NAV_MAX_WIDTH,
                 )
-                .clamp(paned.min_position(), paned.max_position().max(paned.min_position()));
+                .clamp(
+                    paned.min_position(),
+                    paned.max_position().max(paned.min_position()),
+                );
             if paned.position() != want {
                 self.place_paned(paned, want);
             }
@@ -4795,8 +4817,12 @@ impl Ctx {
             let paned = &self.widgets.right_paned;
             let total = paned.width();
             if total > 200 {
-                let want = (total - info_width.clamp(session::INFO_MIN_WIDTH, session::INFO_MAX_WIDTH))
-                    .clamp(paned.min_position(), paned.max_position().max(paned.min_position()));
+                let want = (total
+                    - info_width.clamp(session::INFO_MIN_WIDTH, session::INFO_MAX_WIDTH))
+                .clamp(
+                    paned.min_position(),
+                    paned.max_position().max(paned.min_position()),
+                );
                 if paned.position() != want {
                     self.place_paned(paned, want);
                 }
@@ -4920,5 +4946,7 @@ fn offline_web_view() -> webkit6::WebView {
     let session = webkit6::NetworkSession::new_ephemeral();
     let nowhere = webkit6::NetworkProxySettings::new(Some("http://127.0.0.1:9"), &[]);
     session.set_proxy_settings(webkit6::NetworkProxyMode::Custom, Some(&nowhere));
-    webkit6::WebView::builder().network_session(&session).build()
+    webkit6::WebView::builder()
+        .network_session(&session)
+        .build()
 }

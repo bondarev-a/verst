@@ -205,7 +205,10 @@ mod tests {
         index.outgoing.insert(c.clone(), vec![b.clone()]);
         index.outgoing.insert(d.clone(), vec![b.clone()]);
         let nodes = select_nodes(&index, Some(&lonely));
-        assert_eq!(nodes, vec![lonely, b.clone(), a.clone(), c.clone(), d.clone()]);
+        assert_eq!(
+            nodes,
+            vec![lonely, b.clone(), a.clone(), c.clone(), d.clone()]
+        );
         let nodes = select_nodes(&index, None);
         assert_eq!(nodes, vec![b, a, c, d]);
     }

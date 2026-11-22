@@ -64,7 +64,11 @@ impl Ctx {
             let chips = &state.lists.chips;
             // Список показывает файлы от новых к старым.
             files.len() == chips.len()
-                && files.iter().rev().zip(chips).all(|(path, chip)| *path == chip.path)
+                && files
+                    .iter()
+                    .rev()
+                    .zip(chips)
+                    .all(|(path, chip)| *path == chip.path)
         };
         if !same {
             self.rebuild_pins();
@@ -106,7 +110,9 @@ impl Ctx {
         self.state.borrow_mut().lists.chips.clear();
         let files = self.state.borrow().session.open_files.clone();
         if files.is_empty() {
-            self.widgets.open_list.append(&dim_row("Нет открытых файлов"));
+            self.widgets
+                .open_list
+                .append(&dim_row("Нет открытых файлов"));
             return;
         }
         let mut chips = Vec::with_capacity(files.len());
@@ -188,12 +194,19 @@ impl Ctx {
             let state = self.state.borrow();
             (
                 state.lists.history_built,
-                state.lists.history.iter().map(|row| row.path.clone()).collect(),
+                state
+                    .lists
+                    .history
+                    .iter()
+                    .map(|row| row.path.clone())
+                    .collect(),
             )
         };
-        if !built || files.is_empty() || current.is_empty() {
-            self.rebuild_history();
-        } else if current != files && !self.shift_history_rows(&current, &files) {
+        let rebuild = !built
+            || files.is_empty()
+            || current.is_empty()
+            || (current != files && !self.shift_history_rows(&current, &files));
+        if rebuild {
             self.rebuild_history();
         }
         self.mark_history_rows();

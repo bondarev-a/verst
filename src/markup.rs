@@ -464,9 +464,9 @@ mod tests {
         let source = "[[папка/цель|подпись]]\n";
         let spans = mark_spans(source);
         assert_eq!(markup_of(source, &spans), vec!["[[папка/цель|", "]]"]);
-        assert!(spans.iter().any(
-            |s| matches!(&s.kind, MarkKind::WikiLink { target } if target == "папка/цель")
-        ));
+        assert!(spans
+            .iter()
+            .any(|s| matches!(&s.kind, MarkKind::WikiLink { target } if target == "папка/цель")));
     }
 
     #[test]
@@ -523,7 +523,10 @@ mod tests {
             .find(|s| matches!(s.kind, MarkKind::Heading { level: 1 }))
             .unwrap();
         assert_eq!(&source[heading.start..heading.end], "# Заголовок\n");
-        let mark = spans.iter().find(|s| s.kind == MarkKind::HeadingMark).unwrap();
+        let mark = spans
+            .iter()
+            .find(|s| s.kind == MarkKind::HeadingMark)
+            .unwrap();
         assert_eq!(&source[mark.start..mark.end], "# ");
         let link = spans
             .iter()
@@ -546,7 +549,10 @@ mod tests {
         let spans = mark_spans(source);
         assert_eq!(texts_of(source, &spans, MarkKind::HeadingMark), vec!["# "]);
         assert_eq!(texts_of(source, &spans, MarkKind::Code), vec!["код"]);
-        assert_eq!(texts_of(source, &spans, MarkKind::Delimiter), vec!["`", "`"]);
+        assert_eq!(
+            texts_of(source, &spans, MarkKind::Delimiter),
+            vec!["`", "`"]
+        );
 
         let source = "# **Жирный**\n";
         let spans = mark_spans(source);

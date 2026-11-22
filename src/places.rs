@@ -94,12 +94,19 @@ mod retarget_tests {
 
     #[test]
     fn retarget_rewrites_back_and_forward() {
-        let file = |p: &str| NavPlace::File { path: PathBuf::from(p), line: 3, preview: false };
+        let file = |p: &str| NavPlace::File {
+            path: PathBuf::from(p),
+            line: 3,
+            preview: false,
+        };
         let mut nav = NavHistory::default();
         nav.leave(file("/заметки/а.md"));
         nav.leave(file("/б.md"));
         let _ = nav.back(Some(file("/в.md")));
-        nav.retarget(std::path::Path::new("/заметки/а.md"), std::path::Path::new("/пр/а.md"));
+        nav.retarget(
+            std::path::Path::new("/заметки/а.md"),
+            std::path::Path::new("/пр/а.md"),
+        );
         assert_eq!(nav.back(None), Some(file("/пр/а.md")));
     }
 }

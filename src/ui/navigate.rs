@@ -53,7 +53,7 @@ impl Ctx {
     }
 
     pub(super) fn go(&self, path: PathBuf, line: Option<u32>) {
-    let _prof = crate::ui::prof::span("go");
+        let _prof = crate::ui::prof::span("go");
         if self.state.borrow().loading {
             self.open_path(path);
             if let Some(line) = line {
@@ -380,7 +380,7 @@ impl Ctx {
     }
 
     pub(super) fn settle_open_place(&self, pane: usize, path: &Path, clear_jump: bool) {
-    let _prof = crate::ui::prof::span("settle_open_place");
+        let _prof = crate::ui::prof::span("settle_open_place");
         if self.state.borrow().loading {
             return;
         }
@@ -432,7 +432,7 @@ impl Ctx {
     }
 
     pub(super) fn restore_carets(&self, session: &session::Session) {
-        let focused = session.focused_pane.min(1) as usize;
+        let focused = session.focused_pane.min(1);
         for (pane, path) in session.pane_paths.iter().enumerate() {
             let Some(path) = path else {
                 continue;
@@ -454,7 +454,7 @@ impl Ctx {
         let Some(mut iter) = buffer.iter_at_line(line) else {
             return;
         };
-        let mut line_end = iter.clone();
+        let mut line_end = iter;
         if !line_end.ends_line() {
             line_end.forward_to_line_end();
         }
@@ -650,7 +650,7 @@ fn scroll_view_later(view: &sourceview5::View, line: i32, column: u32) {
             let Some(mut iter) = buffer.iter_at_line(line) else {
                 return;
             };
-            let mut line_end = iter.clone();
+            let mut line_end = iter;
             if !line_end.ends_line() {
                 line_end.forward_to_line_end();
             }

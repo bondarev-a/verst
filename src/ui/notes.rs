@@ -57,7 +57,7 @@ impl Ctx {
     /// пересобирается, только если поменялось то, что в ней видно; скрытая
     /// панель обновляется при показе.
     pub(super) fn refresh_notes(&self) {
-    let _prof = crate::ui::prof::span("refresh_notes");
+        let _prof = crate::ui::prof::span("refresh_notes");
         if !self.widgets.notes_host.is_mapped() {
             self.state.borrow_mut().notes_stale = true;
             return;
@@ -98,7 +98,7 @@ impl Ctx {
             .borrow_mut()
             .notes_cache
             .retain(|path, _| seen.contains(path));
-        found.sort_by(|left, right| right.modified.cmp(&left.modified));
+        found.sort_by_key(|note| std::cmp::Reverse(note.modified));
         let mut filter = filter;
         if filter.as_ref().is_some_and(|tag| {
             !found
@@ -229,9 +229,11 @@ impl Ctx {
                     &month_box,
                 ));
             }
-            self.widgets
-                .notes_host
-                .append(&self.note_branch(year.to_string(), &year.to_string(), &year_box));
+            self.widgets.notes_host.append(&self.note_branch(
+                year.to_string(),
+                &year.to_string(),
+                &year_box,
+            ));
         }
     }
 
@@ -250,9 +252,11 @@ impl Ctx {
                 .as_deref()
                 .map(|tag| format!("#{tag}"))
                 .unwrap_or_else(|| "Без тега".to_string());
-            self.widgets
-                .notes_host
-                .append(&self.note_branch(format!("tag:{title}"), &title, &box_));
+            self.widgets.notes_host.append(&self.note_branch(
+                format!("tag:{title}"),
+                &title,
+                &box_,
+            ));
         }
     }
 
@@ -377,7 +381,9 @@ impl Ctx {
             .default_width(420)
             .build();
         dialog.add_css_class("prompt-dialog");
-        let text = gtk4::Label::new(Some(&format!("Удалить «{label}»? Заметка будет перемещена в корзину.")));
+        let text = gtk4::Label::new(Some(&format!(
+            "Удалить «{label}»? Заметка будет перемещена в корзину."
+        )));
         text.set_wrap(true);
         text.set_halign(gtk4::Align::Start);
         text.set_margin_bottom(12);
@@ -661,7 +667,10 @@ impl Ctx {
             .unwrap_or("заметка")
             .to_string();
         if let Some(text) = self.buffer_text(path) {
-            return (notes::note_label(&text, &stem), markdown::extract_tags(&text));
+            return (
+                notes::note_label(&text, &stem),
+                markdown::extract_tags(&text),
+            );
         }
         if let Some(meta) = self.state.borrow().notes_cache.get(path) {
             if meta.modified == modified && meta.len == len {
@@ -794,7 +803,12 @@ fn month_name(month: u32) -> &'static str {
 impl Ctx {
     /// Ветка дерева заметок. Свёрнутые ветки остаются свёрнутыми после
     /// перестройки панели (раньше каждое сохранение раскрывало их снова).
-    fn note_branch(&self, key: String, title: &str, child: &impl IsA<gtk4::Widget>) -> gtk4::Expander {
+    fn note_branch(
+        &self,
+        key: String,
+        title: &str,
+        child: &impl IsA<gtk4::Widget>,
+    ) -> gtk4::Expander {
         let branch = gtk4::Expander::new(Some(title));
         branch.set_expanded(!self.state.borrow().notes_collapsed.contains(&key));
         branch.set_child(Some(child));

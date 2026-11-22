@@ -17,7 +17,7 @@ impl Ctx {
     }
 
     pub(super) fn open_file(&self, path: PathBuf, keep_mode: bool) {
-    let _prof = crate::ui::prof::span("open_file");
+        let _prof = crate::ui::prof::span("open_file");
         if path.is_dir() {
             return;
         }
@@ -124,7 +124,7 @@ impl Ctx {
     /// Закрыть файл. Изменения сначала записываются; если записать не
     /// удалось, файл остаётся открытым и возвращается `false`.
     pub(super) fn close_file(&self, path: &Path) -> bool {
-    let _prof = crate::ui::prof::span("close_file");
+        let _prof = crate::ui::prof::span("close_file");
         if self.focused_path().as_deref() == Some(path) && self.any_table_cell_focused() {
             self.deactivate_table_cells();
         }
@@ -177,7 +177,7 @@ impl Ctx {
     }
 
     pub(super) fn ensure_buffer(&self, path: &Path) -> Result<(), String> {
-    let _prof = crate::ui::prof::span("ensure_buffer");
+        let _prof = crate::ui::prof::span("ensure_buffer");
         if self.state.borrow().buffers.contains_key(path) {
             return Ok(());
         }
@@ -460,7 +460,7 @@ impl Ctx {
 
     /// Записать буфер в файл. `false` — запись не удалась, текст есть только в памяти.
     pub(super) fn write_file(&self, path: &Path, from_autosave: bool) -> bool {
-    let _prof = crate::ui::prof::span("write_file");
+        let _prof = crate::ui::prof::span("write_file");
         let Some(text) = self.buffer_text(path) else {
             return true;
         };
@@ -476,7 +476,14 @@ impl Ctx {
         if from_autosave && self.state.borrow().conflict.as_deref() == Some(path) {
             return true;
         }
-        if from_autosave && self.state.borrow().buffers.get(path).is_some_and(|e| e.gone) {
+        if from_autosave
+            && self
+                .state
+                .borrow()
+                .buffers
+                .get(path)
+                .is_some_and(|e| e.gone)
+        {
             return true;
         }
         match write_atomic(path, &text) {
@@ -544,7 +551,7 @@ impl Ctx {
     }
 
     pub(super) fn on_disk_changed(&self, path: &Path) {
-    let _prof = crate::ui::prof::span("on_disk_changed");
+        let _prof = crate::ui::prof::span("on_disk_changed");
         if self.state.borrow().conflict.is_some() {
             let mut state = self.state.borrow_mut();
             if !state.conflict_queue.iter().any(|queued| queued == path) {
@@ -700,4 +707,3 @@ fn guard_undo_steps(ctx: &Ctx, buffer: &sourceview5::Buffer, undo: bool) {
         }),
     );
 }
-

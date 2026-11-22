@@ -678,7 +678,11 @@ impl Literal {
 
     /// Конец участка, внутри которого лежит `pos`. Смещения не убывают.
     fn covering(&mut self, pos: usize) -> Option<usize> {
-        while self.ranges.get(self.at).is_some_and(|range| range.end <= pos) {
+        while self
+            .ranges
+            .get(self.at)
+            .is_some_and(|range| range.end <= pos)
+        {
             self.at += 1;
         }
         self.ranges
@@ -730,7 +734,10 @@ fn tag_at(line: &str, index: usize) -> Option<FoundTag> {
 /// или экранирование (`\#`).
 fn tag_glue(ch: char) -> bool {
     ch.is_alphanumeric()
-        || matches!(ch, '_' | '#' | '/' | '.' | ':' | '?' | '&' | '=' | '-' | '\\')
+        || matches!(
+            ch,
+            '_' | '#' | '/' | '.' | ':' | '?' | '&' | '=' | '-' | '\\'
+        )
 }
 
 fn is_tag_char(ch: char) -> bool {
@@ -1089,7 +1096,10 @@ mod tests {
             .map(|(index, _)| index)
             .collect();
         for byte in (0..=text.len()).filter(|b| text.is_char_boundary(*b)) {
-            assert_eq!(newlines.partition_point(|at| *at < byte), line_at_byte(text, byte));
+            assert_eq!(
+                newlines.partition_point(|at| *at < byte),
+                line_at_byte(text, byte)
+            );
         }
     }
 
