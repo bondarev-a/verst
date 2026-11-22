@@ -1290,9 +1290,6 @@ fn cpu_times_ms() -> (f64, f64, usize) {
     (main, all, threads)
 }
 
-extern "C" {
-    fn malloc_trim(pad: usize) -> i32;
-}
 
 /// Анонимная память процесса (куча и прочее) до и после возврата свободного malloc.
 fn mem_report() -> String {
@@ -1309,9 +1306,7 @@ fn mem_report() -> String {
     };
     let before = anon();
     if std::env::var_os("VERST_MEM_TRIM").is_some() {
-        unsafe {
-            malloc_trim(0);
-        }
+        super::support::release_freed_memory();
     }
     let after = anon();
     format!("rss_anon {before:.1} MB, after trim {after:.1} MB")
